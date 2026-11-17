@@ -977,9 +977,12 @@ try {
   console.warn("Firebase init skipped, running in local fallback mode:", e);
 }
 
-// ===== LOCAL / OFFLINE REALTIME MOCK DB (When Firebase is not connected) =====
+// ===== RESILIENT CLOUD REALTIME MESH + MOCK DB =====
 if (!isFirebaseActive || !db) {
   const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('connectly_rt_sync') : null;
+  const CLOUD_SYNC_TOPIC = 'connectly_faraz_mesh_v2';
+  const CLIENT_INSTANCE_ID = 'inst_' + Math.random().toString(36).substring(2, 10);
+
   const initialStore = {
     users: {
       'faraz123': { id: 'faraz123', name: 'Faraz Ahmed (Owner)', bio: 'Connectly Founder 🚀', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
@@ -1038,14 +1041,14 @@ if (!isFirebaseActive || !db) {
     cur[parts[parts.length - 1]] = value;
   }
 
-  function notify(path) {
+  function notifyLocal(path) {
     saveStore();
     for (const [key, cbs] of listeners.entries()) {
       if (key === path || path.startsWith(key + '/') || key.startsWith(path + '/')) {
         const parts = getPathParts(key);
         const val = getNode(parts);
         const snap = {
-          exists: () => val !== undefined && val !== null,
+          exists: () => val !== undefined && val !== null && (typeof val !== 'object' || Object.keys(val).length > 0),
           val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
           key: parts[parts.length - 1] || null
         };
@@ -1059,50 +1062,212 @@ if (!isFirebaseActive || !db) {
     }
   }
 
+  // Cloud Mesh Synchronization over ntfy.sh (Cross-device WebSocket + HTTP)
+  function syncToCloud(op, path, val) {
+    try {
+      if (typeof val === 'string' && val.length > 500000) return;
+      const payload = {
+        inst: CLIENT_INSTANCE_ID,
+        op: op,
+        path: path,
+        val: val,
+        time: Date.now()
+      };
+      fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC, {
+        method: 'POST',
+        headers: { 'Title': 'ConnectlySync' },
+        body: JSON.stringify(payload)
+      }).catch(() => {});
+    } catch (e) {}
+  }
+
+  let cloudWs = null;
+  function initCloudMesh() {
+    try {
+      cloudWs = new WebSocket('wss://ntfy.sh/' + CLOUD_SYNC_TOPIC + '/ws?since=24h');
+      cloudWs.onopen = () => {
+        console.log('Connectly Cloud Mesh connected ☁️');
+        const st = document.getElementById('fbStatusSub');
+        if (st && !isFirebaseActive) {
+          st.textContent = 'Status: Cloud Mesh Live 🟢 (Realtime Cross-Device)';
+          st.style.color = '#22C55E';
+        }
+        if (currentUserId && currentUserData) {
+          syncToCloud('update', 'users/' + currentUserId, currentUserData);
+        }
+      };
+      cloudWs.onmessage = (event) => {
+        try {
+          const item = JSON.parse(event.data);
+          if (item.event !== 'message' || !item.message) return;
+          const data = JSON.parse(item.message);
+          if (!data || data.inst === CLIENT_INSTANCE_ID) return;
+
+          if (data.op === 'set') {
+            const parts = getPathParts(data.path);
+            setNode(parts, data.val);
+            notifyLocal(data.path);
+          } else if (data.op === 'update') {
+            const parts = getPathParts(data.path);
+            let cur = getNode(parts);
+            if (!cur || typeof cur !== 'object') cur = {};
+            for (const [k, v] of Object.entries(data.val || {})) {
+              if (k.includes('/')) {
+                setNode(getPathParts(data.path + '/' + k), v);
+              } else {
+                cur[k] = v;
+              }
+            }
+            setNode(parts, cur);
+            notifyLocal(data.path);
+          } else if (data.op === 'remove') {
+            const parts = getPathParts(data.path);
+            if (parts.length > 0) {
+              const parent = getNode(parts.slice(0, -1));
+              if (parent && typeof parent === 'object') {
+                delete parent[parts[parts.length - 1]];
+              }
+            }
+            notifyLocal(data.path);
+          } else if (data.op === 'query') {
+            if (currentUserId && currentUserData) {
+              syncToCloud('update', 'users/' + currentUserId, currentUserData);
+            }
+          }
+        } catch (err) {}
+      };
+      cloudWs.onclose = () => {
+        setTimeout(initCloudMesh, 3000);
+      };
+      cloudWs.onerror = () => {
+        try { cloudWs.close(); } catch (e) {}
+      };
+    } catch (e) {
+      setTimeout(initCloudMesh, 5000);
+    }
+  }
+  initCloudMesh();
+
   if (syncChannel) {
     syncChannel.onmessage = (e) => {
       if (e.data && e.data.type === 'STORE_UPDATED') {
         try {
           const raw = localStorage.getItem('connectly_local_store');
           if (raw) localData = JSON.parse(raw);
-          for (const [key, cbs] of listeners.entries()) {
-            const parts = getPathParts(key);
-            const val = getNode(parts);
-            const snap = {
-              exists: () => val !== undefined && val !== null,
-              val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
-              key: parts[parts.length - 1] || null
-            };
-            for (const cb of cbs) {
-              try { cb(snap); } catch (err) {}
-            }
-          }
+          notifyLocal(e.data.path);
         } catch (err) {}
       }
     };
   }
 
-  function createRef(path) {
+  function createRef(path, queryParams = {}) {
     const normPath = getPathParts(path).join('/');
+    
     return {
+      path: normPath,
+      queryParams: { ...queryParams },
+
+      child(subPath) {
+        const full = normPath ? normPath + '/' + getPathParts(subPath).join('/') : getPathParts(subPath).join('/');
+        return createRef(full);
+      },
+
+      orderByChild(childKey) {
+        return createRef(normPath, { ...this.queryParams, orderByKey: childKey });
+      },
+      equalTo(val) {
+        return createRef(normPath, { ...this.queryParams, equalToVal: val });
+      },
+      startAt(val) {
+        return createRef(normPath, { ...this.queryParams, startAtVal: val });
+      },
+      endAt(val) {
+        return createRef(normPath, { ...this.queryParams, endAtVal: val });
+      },
+      limitToLast(n) {
+        return createRef(normPath, { ...this.queryParams, limitToLastN: n });
+      },
+      limitToFirst(n) {
+        return createRef(normPath, { ...this.queryParams, limitToFirstN: n });
+      },
+
+      transaction(fn) {
+        const parts = getPathParts(normPath);
+        const cur = getNode(parts);
+        const updated = fn(cur);
+        setNode(parts, updated);
+        notifyLocal(normPath);
+        syncToCloud('set', normPath, updated);
+        return Promise.resolve({ committed: true, snapshot: { val: () => updated } });
+      },
+
       once(event) {
         const parts = getPathParts(normPath);
-        const val = getNode(parts);
+        let val = getNode(parts);
+        
+        if (val && typeof val === 'object' && !Array.isArray(val)) {
+          let entries = Object.entries(val);
+          const q = this.queryParams;
+          if (q.orderByKey) {
+            if (q.equalToVal !== undefined) {
+              entries = entries.filter(([k, v]) => {
+                if (!v || typeof v !== 'object') return false;
+                const subParts = q.orderByKey.split('/');
+                let target = v;
+                for (const sp of subParts) {
+                  if (target === undefined || target === null) break;
+                  target = target[sp];
+                }
+                return target === q.equalToVal;
+              });
+            }
+            if (q.startAtVal !== undefined) {
+              entries = entries.filter(([k, v]) => (v && v[q.orderByKey] >= q.startAtVal));
+            }
+            if (q.endAtVal !== undefined) {
+              entries = entries.filter(([k, v]) => (v && v[q.orderByKey] <= q.endAtVal));
+            }
+          }
+          if (q.limitToLastN) {
+            entries = entries.slice(-q.limitToLastN);
+          }
+          if (q.limitToFirstN) {
+            entries = entries.slice(0, q.limitToFirstN);
+          }
+          val = Object.fromEntries(entries);
+        }
+
         const snap = {
-          exists: () => val !== undefined && val !== null,
+          exists: () => val !== undefined && val !== null && (typeof val !== 'object' || Object.keys(val).length > 0),
           val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
           key: parts[parts.length - 1] || null
         };
         return Promise.resolve(snap);
       },
+
       on(event, callback) {
         if (!listeners.has(normPath)) listeners.set(normPath, new Set());
-        listeners.get(normPath).add(callback);
+        const wrapper = (snap) => {
+          if (event === 'child_added') {
+            const data = snap.val() || {};
+            for (const [k, v] of Object.entries(data)) {
+              callback({
+                key: k,
+                val: () => v,
+                exists: () => true
+              });
+            }
+          } else {
+            callback(snap);
+          }
+        };
+        listeners.get(normPath).add(wrapper);
         this.once(event).then(snap => {
-          try { callback(snap); } catch (e) {}
+          try { wrapper(snap); } catch (e) {}
         });
-        return callback;
+        return wrapper;
       },
+
       off(event, callback) {
         if (!listeners.has(normPath)) return;
         if (callback) {
@@ -1111,12 +1276,15 @@ if (!isFirebaseActive || !db) {
           listeners.delete(normPath);
         }
       },
+
       set(val) {
         const parts = getPathParts(normPath);
         setNode(parts, JSON.parse(JSON.stringify(val)));
-        notify(normPath);
+        notifyLocal(normPath);
+        syncToCloud('set', normPath, val);
         return Promise.resolve();
       },
+
       update(updates) {
         const parts = getPathParts(normPath);
         let cur = getNode(parts);
@@ -1130,9 +1298,11 @@ if (!isFirebaseActive || !db) {
           }
         }
         setNode(parts, cur);
-        notify(normPath);
+        notifyLocal(normPath);
+        syncToCloud('update', normPath, updates);
         return Promise.resolve();
       },
+
       remove() {
         const parts = getPathParts(normPath);
         if (parts.length > 0) {
@@ -1143,9 +1313,11 @@ if (!isFirebaseActive || !db) {
             delete parent[lastKey];
           }
         }
-        notify(normPath);
+        notifyLocal(normPath);
+        syncToCloud('remove', normPath, null);
         return Promise.resolve();
       },
+
       push(val) {
         const autoKey = 'k_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
         const childPath = normPath ? normPath + '/' + autoKey : autoKey;
@@ -1160,6 +1332,7 @@ if (!isFirebaseActive || !db) {
           once: (e) => childRef.once(e)
         };
       },
+
       onDisconnect() {
         return {
           set: (v) => Promise.resolve(),
@@ -1657,7 +1830,11 @@ function searchUsers(query) {
       ).slice(0, 20);
       let html = '';
       if (results.length === 0) {
-        html = '<div class="empty-state"><span class="material-icons">person_search</span><p>No users found</p></div>';
+        html = `<div class="empty-state">
+          <span class="material-icons">person_search</span>
+          <p>No user found in recent list</p>
+          <button class="primary-btn" style="margin-top:12px;padding:8px 16px;border-radius:20px;background:var(--primary);color:#fff" onclick="closeSearchModal();openChat('${escHtml(q)}')">Start Chat with @${escHtml(q)}</button>
+        </div>`;
       }
       for (const [uid, u] of results) {
         const letter = (u.name || uid)[0].toUpperCase();
@@ -1670,13 +1847,16 @@ function searchUsers(query) {
             <div class="chat-name">${escHtml(u.name || uid)}</div>
             <div class="chat-preview">@${uid}</div>
           </div>
+          <div class="chat-meta">
+            <button class="primary-btn" style="padding:6px 14px;border-radius:20px;font-size:12px;background:var(--primary);color:#fff;font-weight:600">Chat</button>
+          </div>
         </div>`;
       }
       document.getElementById('searchResults').innerHTML = html;
     } catch (e) {
       document.getElementById('searchResults').innerHTML = '<div class="empty-state"><p>Search error</p></div>';
     }
-  }, 300);
+  }, 200);
 }
 
 // ===== PROFILE =====
@@ -1959,13 +2139,60 @@ async function showStatusItem(index) {
   }
   // Show content
   const container = document.getElementById('statusContent');
+  clearTimeout(statusTimer);
+
   if (story.type === 'video') {
-    container.innerHTML = `<video src="${story.data}" autoplay playsinline style="max-width:100%;max-height:100%"></video>`;
+    container.innerHTML = `<video src="${story.data}" playsinline controls autoplay style="max-width:100%;max-height:100%;object-fit:contain;background:#000"></video>`;
     const vid = container.querySelector('video');
+    
+    let dur = 15000;
+    const startProgress = (videoDurationMs) => {
+      dur = Math.min(videoDurationMs, 45000);
+      requestAnimationFrame(() => {
+        const fill = document.getElementById('statusFill' + index);
+        if (fill) { fill.style.transition = `width ${dur}ms linear`; fill.style.width = '100%'; }
+      });
+      clearTimeout(statusTimer);
+      statusTimer = setTimeout(() => advanceStatus(), dur);
+    };
+
+    vid.onloadedmetadata = () => {
+      if (vid.duration && !isNaN(vid.duration) && vid.duration > 0) {
+        startProgress(vid.duration * 1000);
+      } else {
+        startProgress(15000);
+      }
+    };
     vid.onended = () => advanceStatus();
+    vid.onerror = () => {
+      console.warn('Video failed to load');
+      advanceStatus();
+    };
+
+    // Attempt autoplay, with muted fallback if browser restricts unmuted audio
+    const playPromise = vid.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(err => {
+        console.warn('Autoplay restricted, retrying muted:', err);
+        vid.muted = true;
+        vid.play().catch(e => console.error('Video play error:', e));
+      });
+    }
+    // Fallback timer if metadata takes time
+    setTimeout(() => {
+      if (!vid.duration) startProgress(15000);
+    }, 1500);
+
   } else {
-    container.innerHTML = `<img src="${story.data}" style="max-width:100%;max-height:100%">`;
+    container.innerHTML = `<img src="${story.data}" style="max-width:100%;max-height:100%;object-fit:contain">`;
+    const dur = 6000;
+    requestAnimationFrame(() => {
+      const fill = document.getElementById('statusFill' + index);
+      if (fill) { fill.style.transition = `width ${dur}ms linear`; fill.style.width = '100%'; }
+    });
+    statusTimer = setTimeout(() => advanceStatus(), dur);
   }
+
   document.getElementById('statusViewerTime').textContent = timeAgo(story.timestamp);
   // Like state
   const liked = story.likes && story.likes[currentUserId];
@@ -1980,16 +2207,6 @@ async function showStatusItem(index) {
   // Record view
   if (story.userId !== currentUserId) {
     db.ref('stories/' + story.id + '/views/' + currentUserId).set(Date.now());
-  }
-  // Animate progress bar
-  clearTimeout(statusTimer);
-  const dur = story.type === 'video' ? 15000 : 6000;
-  requestAnimationFrame(() => {
-    const fill = document.getElementById('statusFill' + index);
-    if (fill) { fill.style.transition = `width ${dur}ms linear`; fill.style.width = '100%'; }
-  });
-  if (story.type !== 'video') {
-    statusTimer = setTimeout(() => advanceStatus(), dur);
   }
 }
 
