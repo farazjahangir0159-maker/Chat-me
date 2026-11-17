@@ -1,0 +1,21 @@
+{
+  "name": "connectly",
+  "version": "1.0.0",
+  "description": "Modern Real-Time Messaging & Social Communication Platform",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "messaging",
+    "chat",
+    "realtime",
+    "websocket",
+    "social",
+    "stories",
+    "connectly"
+  ],
+  "author": "Connectly Team",
+  "license": "MIT"
+}
