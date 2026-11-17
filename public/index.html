@@ -729,6 +729,14 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
             <div class="toggle-slider"></div>
           </label>
         </div>
+        <div class="settings-item" onclick="openFirebaseConfigPrompt()">
+          <div class="icon-wrap" style="background:#F59E0B"><span class="material-icons">cloud_sync</span></div>
+          <div class="settings-item-info">
+            <div class="settings-item-title">Firebase Cloud Sync</div>
+            <div class="settings-item-sub" id="fbStatusSub">Status: Local / Offline Mode</div>
+          </div>
+          <span class="material-icons" style="color:var(--text-muted)">chevron_right</span>
+        </div>
         <div class="settings-item" onclick="handleLogout()">
           <div class="icon-wrap" style="background:#EF4444"><span class="material-icons">logout</span></div>
           <div class="settings-item-info">
@@ -939,18 +947,246 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 
 <script>
 // ===== FIREBASE CONFIG =====
-const firebaseConfig = {
+let savedFbConfig = null;
+try {
+  const customConfig = localStorage.getItem('connectly_firebase_config');
+  if (customConfig) savedFbConfig = JSON.parse(customConfig);
+} catch (e) {}
+
+const defaultFirebaseConfig = {
   apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
+  authDomain: "connectly-app-d9ec8.firebaseapp.com",
+  databaseURL: "https://connectly-app-d9ec8-default-rtdb.firebaseio.com",
+  projectId: "connectly-app-d9ec8",
+  storageBucket: "connectly-app-d9ec8.appspot.com",
+  messagingSenderId: "255649872281",
   appId: "YOUR_APP_ID"
 };
 
-firebase.initializeApp(firebaseConfig);
-const db = firebase.database();
+const firebaseConfig = savedFbConfig || defaultFirebaseConfig;
+let db = null;
+let isFirebaseActive = false;
+
+try {
+  if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "YOUR_API_KEY") {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.database();
+    isFirebaseActive = true;
+  }
+} catch (e) {
+  console.warn("Firebase init skipped, running in local fallback mode:", e);
+}
+
+// ===== LOCAL / OFFLINE REALTIME MOCK DB (When Firebase is not connected) =====
+if (!isFirebaseActive || !db) {
+  const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('connectly_rt_sync') : null;
+  const initialStore = {
+    users: {
+      'faraz123': { id: 'faraz123', name: 'Faraz Ahmed (Owner)', bio: 'Connectly Founder 🚀', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
+      'ahmed456': { id: 'ahmed456', name: 'Ahmed Khan', bio: 'Exploring Connectly ✨', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
+      'jerry': { id: 'jerry', name: 'Jerry Developer', bio: 'Tech lover 💻', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} }
+    },
+    conversations: {},
+    messages: {},
+    stories: {},
+    calls: {},
+    presence: {}
+  };
+
+  let localData = null;
+  try {
+    const raw = localStorage.getItem('connectly_local_store');
+    if (raw) localData = JSON.parse(raw);
+  } catch (e) {}
+
+  if (!localData || !localData.users) {
+    localData = initialStore;
+    try { localStorage.setItem('connectly_local_store', JSON.stringify(localData)); } catch (e) {}
+  }
+
+  const listeners = new Map();
+
+  function saveStore() {
+    try { localStorage.setItem('connectly_local_store', JSON.stringify(localData)); } catch (e) {}
+  }
+
+  function getPathParts(path) {
+    if (!path) return [];
+    return String(path).replace(/^\/|\/$/g, '').split('/').filter(Boolean);
+  }
+
+  function getNode(parts) {
+    let cur = localData;
+    for (const p of parts) {
+      if (cur === undefined || cur === null) return undefined;
+      cur = cur[p];
+    }
+    return cur;
+  }
+
+  function setNode(parts, value) {
+    if (parts.length === 0) {
+      localData = value;
+      return;
+    }
+    let cur = localData;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (!cur[p] || typeof cur[p] !== 'object') cur[p] = {};
+      cur = cur[p];
+    }
+    cur[parts[parts.length - 1]] = value;
+  }
+
+  function notify(path) {
+    saveStore();
+    for (const [key, cbs] of listeners.entries()) {
+      if (key === path || path.startsWith(key + '/') || key.startsWith(path + '/')) {
+        const parts = getPathParts(key);
+        const val = getNode(parts);
+        const snap = {
+          exists: () => val !== undefined && val !== null,
+          val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
+          key: parts[parts.length - 1] || null
+        };
+        for (const cb of cbs) {
+          try { cb(snap); } catch (e) { console.error(e); }
+        }
+      }
+    }
+    if (syncChannel) {
+      syncChannel.postMessage({ type: 'STORE_UPDATED', path });
+    }
+  }
+
+  if (syncChannel) {
+    syncChannel.onmessage = (e) => {
+      if (e.data && e.data.type === 'STORE_UPDATED') {
+        try {
+          const raw = localStorage.getItem('connectly_local_store');
+          if (raw) localData = JSON.parse(raw);
+          for (const [key, cbs] of listeners.entries()) {
+            const parts = getPathParts(key);
+            const val = getNode(parts);
+            const snap = {
+              exists: () => val !== undefined && val !== null,
+              val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
+              key: parts[parts.length - 1] || null
+            };
+            for (const cb of cbs) {
+              try { cb(snap); } catch (err) {}
+            }
+          }
+        } catch (err) {}
+      }
+    };
+  }
+
+  function createRef(path) {
+    const normPath = getPathParts(path).join('/');
+    return {
+      once(event) {
+        const parts = getPathParts(normPath);
+        const val = getNode(parts);
+        const snap = {
+          exists: () => val !== undefined && val !== null,
+          val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
+          key: parts[parts.length - 1] || null
+        };
+        return Promise.resolve(snap);
+      },
+      on(event, callback) {
+        if (!listeners.has(normPath)) listeners.set(normPath, new Set());
+        listeners.get(normPath).add(callback);
+        this.once(event).then(snap => {
+          try { callback(snap); } catch (e) {}
+        });
+        return callback;
+      },
+      off(event, callback) {
+        if (!listeners.has(normPath)) return;
+        if (callback) {
+          listeners.get(normPath).delete(callback);
+        } else {
+          listeners.delete(normPath);
+        }
+      },
+      set(val) {
+        const parts = getPathParts(normPath);
+        setNode(parts, JSON.parse(JSON.stringify(val)));
+        notify(normPath);
+        return Promise.resolve();
+      },
+      update(updates) {
+        const parts = getPathParts(normPath);
+        let cur = getNode(parts);
+        if (!cur || typeof cur !== 'object') cur = {};
+        for (const [k, v] of Object.entries(updates)) {
+          if (k.includes('/')) {
+            const subParts = getPathParts(normPath + '/' + k);
+            setNode(subParts, v);
+          } else {
+            cur[k] = v;
+          }
+        }
+        setNode(parts, cur);
+        notify(normPath);
+        return Promise.resolve();
+      },
+      remove() {
+        const parts = getPathParts(normPath);
+        if (parts.length > 0) {
+          const parentParts = parts.slice(0, -1);
+          const lastKey = parts[parts.length - 1];
+          const parent = getNode(parentParts);
+          if (parent && typeof parent === 'object') {
+            delete parent[lastKey];
+          }
+        }
+        notify(normPath);
+        return Promise.resolve();
+      },
+      push(val) {
+        const autoKey = 'k_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+        const childPath = normPath ? normPath + '/' + autoKey : autoKey;
+        const childRef = createRef(childPath);
+        if (val !== undefined) {
+          childRef.set(val);
+        }
+        return {
+          key: autoKey,
+          set: (v) => childRef.set(v),
+          update: (v) => childRef.update(v),
+          once: (e) => childRef.once(e)
+        };
+      },
+      onDisconnect() {
+        return {
+          set: (v) => Promise.resolve(),
+          update: (v) => Promise.resolve()
+        };
+      }
+    };
+  }
+
+  db = {
+    ref(path) {
+      if (path === '.info/connected') {
+        return {
+          on(evt, cb) {
+            cb({ val: () => true });
+          },
+          off() {}
+        };
+      }
+      return createRef(path);
+    }
+  };
+
+  if (!window.firebase) window.firebase = {};
+  if (!window.firebase.database) window.firebase.database = {};
+  window.firebase.database.ServerValue = { TIMESTAMP: Date.now() };
+}
 
 // ===== GLOBAL STATE =====
 let currentUserId = null;
@@ -1100,14 +1336,58 @@ function updateSettingsUI() {
   const letter = (currentUserData.name || currentUserId)[0].toUpperCase();
   ['settingsAvatarText', 'statusMyAvatarText'].forEach(id => {
     const el = document.getElementById(id);
+    if (!el) return;
     if (currentUserData.avatar) {
       el.parentElement.innerHTML = `<img src="${currentUserData.avatar}">` + (id === 'settingsAvatarText' ? '<div class="edit-overlay"><span class="material-icons">camera_alt</span></div>' : '');
     } else {
       el.textContent = letter;
     }
   });
-  document.getElementById('settingsName').textContent = currentUserData.name || currentUserId;
-  document.getElementById('settingsId').textContent = '@' + currentUserId;
+  const nameEl = document.getElementById('settingsName');
+  const idEl = document.getElementById('settingsId');
+  if (nameEl) nameEl.textContent = currentUserData.name || currentUserId;
+  if (idEl) idEl.textContent = '@' + currentUserId;
+  const fbSub = document.getElementById('fbStatusSub');
+  if (fbSub) {
+    fbSub.textContent = isFirebaseActive ? 'Status: Active (Connected to Cloud ☁️)' : 'Status: Local Mode (Tap to connect Firebase)';
+    fbSub.style.color = isFirebaseActive ? 'var(--success)' : 'var(--warning)';
+  }
+}
+
+function openFirebaseConfigPrompt() {
+  const current = localStorage.getItem('connectly_firebase_config') || '';
+  const input = prompt(
+    'Firebase Realtime Database Setup:\n\nFirebase Console se apnay web app ka config code ya API Key paste karein:\n(e.g. {"apiKey":"...","databaseURL":"..."})',
+    current
+  );
+  if (!input || !input.trim()) return;
+  try {
+    let cfg = null;
+    const str = input.trim();
+    if (str.startsWith('{')) {
+      cfg = JSON.parse(str);
+    } else if (str.includes('apiKey')) {
+      const apiKeyMatch = str.match(/apiKey:\s*["']([^"']+)["']/);
+      const dbUrlMatch = str.match(/databaseURL:\s*["']([^"']+)["']/);
+      const projMatch = str.match(/projectId:\s*["']([^"']+)["']/);
+      cfg = {
+        apiKey: apiKeyMatch ? apiKeyMatch[1] : str,
+        authDomain: projMatch ? `${projMatch[1]}.firebaseapp.com` : 'connectly-app-d9ec8.firebaseapp.com',
+        databaseURL: dbUrlMatch ? dbUrlMatch[1] : 'https://connectly-app-d9ec8-default-rtdb.firebaseio.com',
+        projectId: projMatch ? projMatch[1] : 'connectly-app-d9ec8',
+        storageBucket: projMatch ? `${projMatch[1]}.appspot.com` : 'connectly-app-d9ec8.appspot.com',
+        messagingSenderId: '255649872281',
+        appId: '1:255649872281:web:connectly'
+      };
+    } else {
+      cfg = { ...defaultFirebaseConfig, apiKey: str };
+    }
+    localStorage.setItem('connectly_firebase_config', JSON.stringify(cfg));
+    alert('Firebase Config saved successfully! Reloading...');
+    location.reload();
+  } catch (err) {
+    alert('Invalid configuration format: ' + err.message);
+  }
 }
 
 // ===== CONVERSATIONS =====
