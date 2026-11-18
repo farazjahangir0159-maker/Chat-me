@@ -1335,10 +1335,29 @@ if (!isFirebaseActive || !db) {
     }
   }
 
+  // Direct media upload via ntfy media channel (gives direct binary stream URL with CORS)
+  async function uploadMediaFile(fileOrBlob, defaultName = 'media.jpg') {
+    try {
+      const fname = (fileOrBlob && fileOrBlob.name) ? fileOrBlob.name : defaultName;
+      const res = await fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC + '_media', {
+        method: 'PUT',
+        headers: { 'Filename': fname },
+        body: fileOrBlob
+      });
+      const json = await res.json();
+      if (json && json.attachment && json.attachment.url) {
+        return json.attachment.url;
+      }
+    } catch (e) {
+      console.error('Media upload error:', e);
+    }
+    return null;
+  }
+  window.uploadMediaFile = uploadMediaFile;
+
   // Cloud Mesh Synchronization over ntfy.sh (Cross-device WebSocket + HTTP)
   function syncToCloud(op, path, val) {
     try {
-      if (typeof val === 'string' && val.length > 500000) return;
       const payload = {
         inst: CLIENT_INSTANCE_ID,
         op: op,
@@ -1388,18 +1407,42 @@ if (!isFirebaseActive || !db) {
         }
         if (currentUserId && currentUserData) {
           syncToCloud('update', 'users/' + currentUserId, currentUserData);
+          // Broadcast our active stories to mesh
+          const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+          const allSt = getNode(['stories']) || {};
+          for (const [stId, st] of Object.entries(allSt)) {
+            if (st && st.userId === currentUserId && st.timestamp >= cutoff) {
+              syncToCloud('set', 'stories/' + stId, st);
+            }
+          }
         }
       };
-      cloudWs.onmessage = (event) => {
+      cloudWs.onmessage = async (event) => {
         try {
           const item = JSON.parse(event.data);
-          if (item.event !== 'message' || !item.message) return;
-          const data = JSON.parse(item.message);
+          if (item.event !== 'message') return;
+
+          let rawText = item.message;
+          // Decode file attachments when payload > 4KB
+          if (item.attachment && item.attachment.url) {
+            try {
+              const resp = await fetch(item.attachment.url);
+              rawText = await resp.text();
+            } catch (fe) {
+              return;
+            }
+          }
+          if (!rawText) return;
+          const data = JSON.parse(rawText);
           if (!data || data.inst === CLIENT_INSTANCE_ID) return;
 
           if (data.type === 'CALL_SIGNAL') {
-            if (data.to === currentUserId) {
-              handleIncomingCallSignal(data);
+            if (data.to === currentUserId && data.from !== currentUserId) {
+              const sigAge = Date.now() - (data.time || 0);
+              // Strictly reject old/replayed call signals (older than 15s or before app boot)
+              if (data.time && data.time >= (window.APP_BOOT_TIME || 0) - 3000 && sigAge >= 0 && sigAge < 15000) {
+                handleIncomingCallSignal(data);
+              }
             }
             return;
           }
@@ -1407,7 +1450,27 @@ if (!isFirebaseActive || !db) {
           if (data.op === 'set') {
             const parts = getPathParts(data.path);
             setNode(parts, data.val);
+            if (data.path.startsWith('users/')) {
+              const uid = data.path.split('/')[1];
+              delete usersCache[uid];
+              if (currentChatUserId === uid) {
+                const u = data.val || {};
+                const letter = (u.name || uid)[0].toUpperCase();
+                const avatarEl = document.getElementById('chatAvatar');
+                if (avatarEl) {
+                  if (u.avatar) avatarEl.innerHTML = `<img src="${u.avatar}">`;
+                  else avatarEl.innerHTML = `<span id="chatAvatarText">${letter}</span>`;
+                }
+                const nameEl = document.getElementById('chatHeaderName');
+                if (nameEl && u.name) nameEl.textContent = u.name;
+              }
+            }
             notifyLocal(data.path);
+            if (data.path.startsWith('stories')) {
+              if (typeof loadStatuses === 'function') loadStatuses();
+              if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
+              if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
+            }
           } else if (data.op === 'update') {
             const parts = getPathParts(data.path);
             let cur = getNode(parts);
@@ -1420,7 +1483,27 @@ if (!isFirebaseActive || !db) {
               }
             }
             setNode(parts, cur);
+            if (data.path.startsWith('users/')) {
+              const uid = data.path.split('/')[1];
+              delete usersCache[uid];
+              if (currentChatUserId === uid) {
+                const u = getNode(['users', uid]) || {};
+                const letter = (u.name || uid)[0].toUpperCase();
+                const avatarEl = document.getElementById('chatAvatar');
+                if (avatarEl) {
+                  if (u.avatar) avatarEl.innerHTML = `<img src="${u.avatar}">`;
+                  else avatarEl.innerHTML = `<span id="chatAvatarText">${letter}</span>`;
+                }
+                const nameEl = document.getElementById('chatHeaderName');
+                if (nameEl && u.name) nameEl.textContent = u.name;
+              }
+            }
             notifyLocal(data.path);
+            if (data.path.startsWith('stories')) {
+              if (typeof loadStatuses === 'function') loadStatuses();
+              if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
+              if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
+            }
           } else if (data.op === 'remove') {
             const parts = getPathParts(data.path);
             if (parts.length > 0) {
@@ -1433,6 +1516,13 @@ if (!isFirebaseActive || !db) {
           } else if (data.op === 'query') {
             if (currentUserId && currentUserData) {
               syncToCloud('update', 'users/' + currentUserId, currentUserData);
+              const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+              const allSt = getNode(['stories']) || {};
+              for (const [stId, st] of Object.entries(allSt)) {
+                if (st && st.userId === currentUserId && st.timestamp >= cutoff) {
+                  syncToCloud('set', 'stories/' + stId, st);
+                }
+              }
             }
           }
         } catch (err) {}
@@ -1663,6 +1753,7 @@ if (!isFirebaseActive || !db) {
 }
 
 // ===== GLOBAL STATE =====
+const APP_BOOT_TIME = Date.now();
 let currentUserId = null;
 let currentUserData = null;
 let currentChatUserId = null;
@@ -2141,7 +2232,7 @@ function renderMessages(msgs) {
     // 2. Video
     if (msg.video) {
       content += `<div class="msg-video-card">
-        <video src="${msg.video}" controls playsinline preload="metadata"></video>
+        <video src="${msg.video}" controls playsinline preload="metadata" onclick="if(this.paused){this.play();}"></video>
       </div>`;
     }
 
@@ -2303,49 +2394,24 @@ function handleChatMediaSelect(event) {
     };
     reader.readAsDataURL(file);
   } else if (isVideo) {
-    if (file.size > 25 * 1024 * 1024) {
-      showToast('Video too large. Max 25MB allowed.');
+    if (file.size > 50 * 1024 * 1024) {
+      showToast('Video too large. Max 50MB allowed.');
       event.target.value = '';
       return;
     }
 
-    if (file.size <= 1.8 * 1024 * 1024) {
-      showToast('Loading video...');
-      const reader = new FileReader();
-      reader.onload = function(e) {
-        pendingMedia = { type: 'video', data: e.target.result, name: file.name };
+    showToast('Uploading video...');
+    uploadMediaFile(file, file.name || 'video.mp4').then(streamUrl => {
+      if (streamUrl) {
+        pendingMedia = { type: 'video', data: streamUrl, name: file.name };
         document.getElementById('imgPreviewThumb').style.display = 'none';
         document.getElementById('videoPreviewIcon').style.display = 'flex';
-        document.getElementById('previewBarLabel').textContent = 'Video attached: ' + file.name;
+        document.getElementById('previewBarLabel').textContent = 'Video ready: ' + file.name;
         document.getElementById('imgPreviewBar').classList.add('show');
         updateSendVoiceBtnVisibility();
-      };
-      reader.readAsDataURL(file);
-    } else {
-      showToast('Uploading video to cloud stream...');
-      const formData = new FormData();
-      formData.append('file', file);
-      fetch('https://tmpfiles.org/api/v1/upload', {
-        method: 'POST',
-        body: formData
-      })
-      .then(res => res.json())
-      .then(json => {
-        if (json.status === 'success' && json.data && json.data.url) {
-          const streamUrl = json.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-          pendingMedia = { type: 'video', data: streamUrl, name: file.name };
-          document.getElementById('imgPreviewThumb').style.display = 'none';
-          document.getElementById('videoPreviewIcon').style.display = 'flex';
-          document.getElementById('previewBarLabel').textContent = 'Video ready: ' + file.name;
-          document.getElementById('imgPreviewBar').classList.add('show');
-          updateSendVoiceBtnVisibility();
-          showToast('Video ready to send!');
-        } else {
-          throw new Error('Upload error');
-        }
-      })
-      .catch(err => {
-        console.warn('Cloud video fallback to direct data URL:', err);
+        showToast('Video ready to send! 🎥');
+      } else {
+        // Fallback to data URL
         const reader = new FileReader();
         reader.onload = function(e) {
           pendingMedia = { type: 'video', data: e.target.result, name: file.name };
@@ -2356,8 +2422,8 @@ function handleChatMediaSelect(event) {
           updateSendVoiceBtnVisibility();
         };
         reader.readAsDataURL(file);
-      });
-    }
+      }
+    });
   }
   event.target.value = '';
 }
@@ -2846,12 +2912,26 @@ function closeEditProfile() {
 function handleAvatarSelect(event) {
   const file = event.target.files[0];
   if (!file) return;
-  if (file.size > 200000) { showToast('Avatar too large. Max 200KB.'); return; }
+  showToast('Processing photo...');
   const reader = new FileReader();
   reader.onload = function(e) {
-    const avatarEl = document.getElementById('editAvatar');
-    avatarEl.innerHTML = `<img src="${e.target.result}"><div class="edit-overlay"><span class="material-icons">camera_alt</span></div>`;
-    avatarEl.dataset.newAvatar = e.target.result;
+    const img = new Image();
+    img.onload = function() {
+      const canvas = document.createElement('canvas');
+      canvas.width = 180;
+      canvas.height = 180;
+      const ctx = canvas.getContext('2d');
+      const minDim = Math.min(img.width, img.height);
+      const sx = (img.width - minDim) / 2;
+      const sy = (img.height - minDim) / 2;
+      ctx.drawImage(img, sx, sy, minDim, minDim, 0, 0, 180, 180);
+      const comp = canvas.toDataURL('image/jpeg', 0.75);
+      const avatarEl = document.getElementById('editAvatar');
+      avatarEl.innerHTML = `<img src="${comp}"><div class="edit-overlay"><span class="material-icons">camera_alt</span></div>`;
+      avatarEl.dataset.newAvatar = comp;
+      showToast('Photo selected! Tap "Save Changes"');
+    };
+    img.src = e.target.result;
   };
   reader.readAsDataURL(file);
   event.target.value = '';
@@ -2863,13 +2943,16 @@ async function saveProfile() {
   if (!name) { showToast('Name is required'); return; }
   const updates = { name, bio };
   const avatarEl = document.getElementById('editAvatar');
-  if (avatarEl.dataset.newAvatar) { updates.avatar = avatarEl.dataset.newAvatar; delete avatarEl.dataset.newAvatar; }
+  if (avatarEl.dataset.newAvatar) {
+    updates.avatar = avatarEl.dataset.newAvatar;
+    delete avatarEl.dataset.newAvatar;
+  }
   await db.ref('users/' + currentUserId).update(updates);
   currentUserData = { ...currentUserData, ...updates };
-  usersCache[currentUserId] = null;
+  usersCache[currentUserId] = currentUserData;
   updateSettingsUI();
   closeEditProfile();
-  showToast('Profile updated');
+  showToast('Profile updated! ✨');
 }
 
 // ===== STATUS / STORIES =====
@@ -2941,21 +3024,63 @@ function handleStatusFileSelect(event) {
   const file = event.target.files[0];
   if (!file) return;
   const isVideo = file.type.startsWith('video');
-  if (file.size > 2000000) { showToast('File too large. Max 2MB for base64 storage.'); event.target.value = ''; return; }
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    statusFileData = e.target.result;
-    statusFileType = isVideo ? 'video' : 'image';
-    const preview = document.getElementById('statusUploadPreview');
-    if (isVideo) {
-      preview.innerHTML = `<video src="${statusFileData}" controls style="max-width:100%;max-height:100%"></video>`;
-    } else {
-      preview.innerHTML = `<img src="${statusFileData}" style="max-width:100%;max-height:100%">`;
+
+  if (isVideo) {
+    if (file.size > 50 * 1024 * 1024) {
+      showToast('Video too large. Max 50MB allowed.');
+      event.target.value = '';
+      return;
     }
-    document.getElementById('statusUpload').classList.add('show');
-    document.getElementById('statusUpload').style.display = 'flex';
-  };
-  reader.readAsDataURL(file);
+    showToast('Uploading status video...');
+    uploadMediaFile(file, 'status_video.mp4').then(url => {
+      if (url) {
+        statusFileData = url;
+        statusFileType = 'video';
+        const preview = document.getElementById('statusUploadPreview');
+        preview.innerHTML = `<video src="${statusFileData}" controls autoplay playsinline style="max-width:100%;max-height:100%"></video>`;
+        document.getElementById('statusUpload').classList.add('show');
+        document.getElementById('statusUpload').style.display = 'flex';
+        showToast('Video ready! Add caption and tap Send');
+      } else {
+        showToast('Could not upload video');
+      }
+    });
+  } else {
+    showToast('Preparing status photo...');
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const img = new Image();
+      img.onload = function() {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+        const maxDim = 1080;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        const comp = canvas.toDataURL('image/jpeg', 0.72);
+        statusFileData = comp;
+        statusFileType = 'image';
+        const preview = document.getElementById('statusUploadPreview');
+        preview.innerHTML = `<img src="${statusFileData}" style="max-width:100%;max-height:100%">`;
+        document.getElementById('statusUpload').classList.add('show');
+        document.getElementById('statusUpload').style.display = 'flex';
+        showToast('Photo ready! Add caption and tap Send');
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
   event.target.value = '';
 }
 
@@ -3137,10 +3262,12 @@ async function toggleStatusLike(e) {
 // ===== CALLS (WEBRTC AUDIO & VIDEO WITH CLOUD MESH SIGNALING) =====
 function listenForIncomingCalls() {
   if (incomingCallListenerRef) db.ref('calls').off('child_added', incomingCallListenerRef);
+  const bootThreshold = (typeof APP_BOOT_TIME !== 'undefined' ? APP_BOOT_TIME : Date.now()) - 3000;
   incomingCallListenerRef = db.ref('calls').orderByChild('to').equalTo(currentUserId).on('child_added', async snap => {
     const call = snap.val();
     if (!call || call.status !== 'ringing' || call.from === currentUserId) return;
-    if (Date.now() - call.timestamp > 30000) return;
+    // Strictly reject old/replayed calls on open
+    if (!call.timestamp || call.timestamp < bootThreshold || (Date.now() - call.timestamp > 15000)) return;
     incomingCallData = { ...call, id: snap.key, callId: snap.key, callType: call.type };
     currentCallType = call.type;
     const caller = await getUserData(call.from);
@@ -3161,6 +3288,11 @@ async function handleIncomingCallSignal(sig) {
 
   if (sig.action === 'incoming') {
     if (currentCallId) return; // already on a call
+    if (sig.from === currentUserId) return; // cannot call myself
+    const bootThreshold = (typeof APP_BOOT_TIME !== 'undefined' ? APP_BOOT_TIME : Date.now()) - 3000;
+    const sigAge = Date.now() - (sig.time || 0);
+    // Ignore any call signal older than 15s or sent before this app session started
+    if (!sig.time || sig.time < bootThreshold || sigAge > 15000 || sigAge < 0) return;
     incomingCallData = {
       id: sig.callId || ('call_' + Date.now()),
       callId: sig.callId || ('call_' + Date.now()),
