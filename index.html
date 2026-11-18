@@ -233,7 +233,15 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 .message.received {
   align-self: flex-start; background: var(--received-bubble);
   border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  margin-left: 40px; position: relative;
 }
+.msg-avatar {
+  width: 30px; height: 30px; border-radius: 50%; position: absolute;
+  left: -38px; bottom: 4px; background: var(--gradient);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: white; overflow: hidden; flex-shrink: 0;
+}
+.msg-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 .message .msg-text { font-size: 14px; line-height: 1.4; word-break: break-word; }
 .message .msg-image { max-width: 100%; border-radius: 8px; margin-bottom: 4px; cursor: pointer; max-height: 300px; display: block; }
 .message .msg-time { font-size: 10px; color: var(--text-muted); text-align: right; margin-top: 2px; }
@@ -2079,12 +2087,43 @@ function renderMessages(msgs) {
     container.innerHTML = '<div class="empty-state"><span class="material-icons">chat_bubble_outline</span><p>No messages yet. Say hello!</p></div>';
     return;
   }
+
+  // Get partner data for avatar on received messages
+  let partnerAvatar = '';
+  let partnerLetter = '?';
+  if (currentChatUserId && usersCache[currentChatUserId]) {
+    const p = usersCache[currentChatUserId];
+    partnerAvatar = p.avatar || '';
+    partnerLetter = (p.name || currentChatUserId)[0].toUpperCase();
+  } else if (currentChatUserId) {
+    partnerLetter = currentChatUserId[0].toUpperCase();
+    // Async fetch won't block, use cached or fallback
+    getUserData(currentChatUserId).then(p => {
+      partnerAvatar = p.avatar || '';
+      partnerLetter = (p.name || currentChatUserId)[0].toUpperCase();
+      // Re-render avatars after data loads
+      document.querySelectorAll('.msg-avatar[data-partner]').forEach(el => {
+        if (partnerAvatar) {
+          el.innerHTML = `<img src="${partnerAvatar}">`;
+        } else {
+          el.textContent = partnerLetter;
+        }
+      });
+    });
+  }
+
+  const avatarHtml = partnerAvatar
+    ? `<div class="msg-avatar" data-partner="1"><img src="${partnerAvatar}"></div>`
+    : `<div class="msg-avatar" data-partner="1">${partnerLetter}</div>`;
+
   let html = '';
   let lastDate = '';
+  let lastSender = '';
   for (const [id, msg] of entries) {
     const msgDate = new Date(msg.timestamp).toLocaleDateString();
     if (msgDate !== lastDate) {
       lastDate = msgDate;
+      lastSender = '';
       const isToday = msgDate === new Date().toLocaleDateString();
       const isYesterday = msgDate === new Date(Date.now() - 86400000).toLocaleDateString();
       const dateLabel = isToday ? 'Today' : (isYesterday ? 'Yesterday' : msgDate);
@@ -2134,7 +2173,12 @@ function renderMessages(msgs) {
     }
 
     const isSticker = !!msg.sticker && !msg.text && !msg.image && !msg.video && !msg.audio;
+    // Show partner avatar on received messages (only on first in a group from same sender)
+    const showAvatar = !isSent && lastSender !== msg.senderId;
+    lastSender = msg.senderId;
+
     html += `<div class="message ${isSent ? 'sent' : 'received'}${isSticker ? ' sticker-msg' : ''}">
+      ${(!isSent && showAvatar) ? avatarHtml : (!isSent ? '<div class="msg-avatar" style="visibility:hidden" data-partner="1"></div>' : '')}
       ${content}
       <div class="msg-time">${timeStr}</div>
     </div>`;
@@ -2835,6 +2879,16 @@ function loadStatuses() {
     const stories = snap.val() || {};
     renderStatuses(stories);
   });
+  // Refresh statuses every 30 seconds to catch cross-device updates
+  if (!window._statusRefreshTimer) {
+    window._statusRefreshTimer = setInterval(() => {
+      const c2 = Date.now() - 24 * 60 * 60 * 1000;
+      db.ref('stories').orderByChild('timestamp').startAt(c2).once('value', snap => {
+        const stories = snap.val() || {};
+        renderStatuses(stories);
+      });
+    }, 30000);
+  }
 }
 
 async function renderStatuses(stories) {
