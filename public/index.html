@@ -647,6 +647,17 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 #localVideo {
   position: absolute; top: 80px; right: 16px; width: 120px; height: 160px;
   border-radius: 12px; z-index: 2; object-fit: cover; box-shadow: var(--shadow-lg);
+  transform: scaleX(-1);
+}
+#callScreen.video-live .call-avatar,
+#callScreen.video-live .call-screen-name {
+  display: none;
+}
+#callScreen.video-live .call-screen-content {
+  position: absolute; bottom: 36px; left: 0; right: 0; z-index: 3;
+}
+#callScreen.video-live .call-screen-status {
+  margin-bottom: 20px; text-shadow: 0 1px 6px rgba(0,0,0,0.8); color: #fff; font-weight: 600;
 }
 
 /* ===== SETTINGS TAB ===== */
@@ -2360,9 +2371,10 @@ function renderMessages(msgs) {
     // 3. Voice Message
     if (msg.audio) {
       const audioId = 'aud_' + id;
-      const durStr = formatAudioDuration(msg.audioDuration || 0);
-      content += `<div class="voice-msg-player">
-        <button type="button" class="voice-play-ctrl" onclick="playVoiceNote('${audioId}', this)"><span class="material-icons">play_arrow</span></button>
+      const rawDur = msg.audioDuration || 1;
+      const durStr = formatAudioDuration(rawDur);
+      content += `<div class="voice-msg-player" style="cursor:pointer" onclick="playVoiceNote('${audioId}', this)">
+        <button type="button" class="voice-play-ctrl"><span class="material-icons">play_arrow</span></button>
         <div class="voice-waveform-wrap">
           <div class="voice-wave-bars">
             <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
@@ -2370,7 +2382,7 @@ function renderMessages(msgs) {
           <div class="voice-progress-bar"><div class="voice-progress-fill" id="prog_${audioId}"></div></div>
         </div>
         <span class="voice-time-label" id="dur_${audioId}">${durStr}</span>
-        <audio id="${audioId}" src="${msg.audio}" preload="metadata" ontimeupdate="updateVoiceProgress('${audioId}')" onended="resetVoiceNote('${audioId}')"></audio>
+        <audio id="${audioId}" src="${msg.audio}" data-duration="${rawDur}" preload="metadata" ontimeupdate="updateVoiceProgress('${audioId}')" onended="resetVoiceNote('${audioId}')" onerror="showToast('Could not load voice note')"></audio>
       </div>`;
     }
 
@@ -2604,7 +2616,9 @@ async function startVoiceRecord() {
       // Upload audio to ntfy.sh for cross-device streaming (small URL instead of large base64)
       let audioSrc = null;
       try {
-        const uploadUrl = await uploadMediaFile(audioBlob, 'voice_' + Date.now() + '.webm');
+        const mime = (audioBlob.type || '').toLowerCase();
+        const ext = mime.includes('mp4') ? 'mp4' : (mime.includes('ogg') ? 'ogg' : (mime.includes('wav') ? 'wav' : 'webm'));
+        const uploadUrl = await uploadMediaFile(audioBlob, 'voice_' + Date.now() + '.' + ext);
         if (uploadUrl) {
           audioSrc = uploadUrl;
         }
@@ -2703,9 +2717,11 @@ function toggleVoiceRecord() {
 let currentPlayingAudio = null;
 let currentPlayingBtn = null;
 
-function playVoiceNote(audioId, btnEl) {
+function playVoiceNote(audioId, triggerEl) {
   const audioEl = document.getElementById(audioId);
   if (!audioEl) return;
+  const playerEl = triggerEl ? (triggerEl.classList.contains('voice-msg-player') ? triggerEl : triggerEl.closest('.voice-msg-player')) : audioEl.closest('.voice-msg-player');
+  const btnEl = playerEl ? playerEl.querySelector('.voice-play-ctrl') : triggerEl;
 
   if (currentPlayingAudio && currentPlayingAudio !== audioEl) {
     currentPlayingAudio.pause();
@@ -2716,18 +2732,21 @@ function playVoiceNote(audioId, btnEl) {
     }
   }
 
-  const waveBars = btnEl.closest('.voice-msg-player')?.querySelector('.voice-wave-bars');
+  const waveBars = playerEl?.querySelector('.voice-wave-bars');
 
   if (audioEl.paused) {
     audioEl.play().then(() => {
-      btnEl.innerHTML = '<span class="material-icons">pause</span>';
+      if (btnEl) btnEl.innerHTML = '<span class="material-icons">pause</span>';
       if (waveBars) waveBars.classList.add('playing');
       currentPlayingAudio = audioEl;
       currentPlayingBtn = btnEl;
-    }).catch(e => console.error(e));
+    }).catch(e => {
+      console.error('Voice playback error:', e);
+      showToast('Tap again to play voice message');
+    });
   } else {
     audioEl.pause();
-    btnEl.innerHTML = '<span class="material-icons">play_arrow</span>';
+    if (btnEl) btnEl.innerHTML = '<span class="material-icons">play_arrow</span>';
     if (waveBars) waveBars.classList.remove('playing');
   }
 }
@@ -2737,18 +2756,26 @@ function updateVoiceProgress(audioId) {
   const fillEl = document.getElementById('prog_' + audioId);
   const timeEl = document.getElementById('dur_' + audioId);
   if (!audioEl) return;
-  if (audioEl.duration && fillEl) {
-    const pct = (audioEl.currentTime / audioEl.duration) * 100;
+  const fallbackDur = parseFloat(audioEl.dataset.duration || '1') || 1;
+  const totalDur = (isFinite(audioEl.duration) && audioEl.duration > 0) ? audioEl.duration : fallbackDur;
+  if (totalDur > 0 && fillEl) {
+    const pct = Math.min(100, (audioEl.currentTime / totalDur) * 100);
     fillEl.style.width = pct + '%';
   }
-  if (timeEl && audioEl.currentTime) {
+  if (timeEl && audioEl.currentTime > 0) {
     timeEl.textContent = formatAudioDuration(Math.floor(audioEl.currentTime));
   }
 }
 
 function resetVoiceNote(audioId) {
+  const audioEl = document.getElementById(audioId);
   const fillEl = document.getElementById('prog_' + audioId);
+  const timeEl = document.getElementById('dur_' + audioId);
   if (fillEl) fillEl.style.width = '0%';
+  if (timeEl && audioEl) {
+    const fallbackDur = parseFloat(audioEl.dataset.duration || '0') || 0;
+    timeEl.textContent = formatAudioDuration(fallbackDur);
+  }
   if (currentPlayingBtn) {
     currentPlayingBtn.innerHTML = '<span class="material-icons">play_arrow</span>';
     currentPlayingBtn.closest('.voice-msg-player')?.querySelector('.voice-wave-bars')?.classList.remove('playing');
@@ -3122,8 +3149,16 @@ async function saveProfile() {
   const updates = { name, bio };
   const avatarEl = document.getElementById('editAvatar');
   if (avatarEl.dataset.newAvatar) {
-    updates.avatar = avatarEl.dataset.newAvatar;
+    const rawAvatar = avatarEl.dataset.newAvatar;
     delete avatarEl.dataset.newAvatar;
+    showToast('Uploading profile photo...');
+    let avatarSrc = rawAvatar;
+    try {
+      const avatarBlob = await (await fetch(rawAvatar)).blob();
+      const uploadUrl = await uploadMediaFile(avatarBlob, 'avatar_' + currentUserId + '.jpg');
+      if (uploadUrl) avatarSrc = uploadUrl;
+    } catch (ue) { console.warn('Avatar upload fallback to base64:', ue); }
+    updates.avatar = avatarSrc;
   }
   await db.ref('users/' + currentUserId).update(updates);
   currentUserData = { ...currentUserData, ...updates };
@@ -3559,8 +3594,13 @@ async function handleIncomingCallSignal(sig) {
   }
 }
 
+let webrtcInitPromise = null;
+
 async function handleRemoteOffer(sig) {
   try {
+    if (webrtcInitPromise) {
+      await webrtcInitPromise;
+    }
     if (!peerConnection) {
       await setupWebRTC(false);
     }
@@ -3787,98 +3827,104 @@ function showCallScreen(user, type) {
 }
 
 async function setupWebRTC(isOffer) {
-  try {
-    const constraints = {
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      },
-      video: currentCallType === 'video' ? {
-        facingMode: 'user',
-        width: { ideal: 640 },
-        height: { ideal: 480 }
-      } : false
-    };
+  if (webrtcInitPromise) return webrtcInitPromise;
+  webrtcInitPromise = (async () => {
+    try {
+      const constraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: currentCallType === 'video' ? {
+          facingMode: 'user',
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        } : false
+      };
 
-    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      localStream = await navigator.mediaDevices.getUserMedia(constraints);
 
-    if (currentCallType === 'video') {
-      const localVid = document.getElementById('localVideo');
-      if (localVid) {
-        localVid.srcObject = localStream;
-        localVid.style.display = 'block';
-      }
-    }
-
-    peerConnection = new RTCPeerConnection(ICE_SERVERS);
-
-    localStream.getTracks().forEach(track => {
-      peerConnection.addTrack(track, localStream);
-    });
-
-    peerConnection.ontrack = (event) => {
-      callConnected = true;
-      stopRingingAudio();
-      const stream = event.streams[0];
-      const remoteVid = document.getElementById('remoteVideo');
-      const remoteAud = document.getElementById('remoteAudio');
-
-      if (remoteVid) {
-        remoteVid.srcObject = stream;
-        if (currentCallType === 'video') {
-          remoteVid.style.display = 'block';
-          const content = document.querySelector('.call-screen-content');
-          if (content) content.style.opacity = '0';
+      if (currentCallType === 'video') {
+        const localVid = document.getElementById('localVideo');
+        if (localVid) {
+          localVid.srcObject = localStream;
+          localVid.style.display = 'block';
         }
-        remoteVid.play().catch(e => console.warn('remoteVid play err:', e));
       }
-      if (remoteAud) {
-        remoteAud.srcObject = stream;
-        remoteAud.play().catch(e => console.warn('remoteAud play err:', e));
-      }
-      startCallTimer();
-    };
 
-    peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
-        const partner = isCallInitiator ? currentChatUserId : (incomingCallData ? incomingCallData.from : currentChatUserId);
-        if (partner) {
-          sendCallSignal('ice', partner, { candidate: event.candidate, callId: currentCallId });
+      peerConnection = new RTCPeerConnection(ICE_SERVERS);
+
+      localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStream);
+      });
+
+      peerConnection.ontrack = (event) => {
+        callConnected = true;
+        stopRingingAudio();
+        const stream = event.streams[0];
+        const remoteVid = document.getElementById('remoteVideo');
+        const remoteAud = document.getElementById('remoteAudio');
+
+        if (remoteVid) {
+          remoteVid.srcObject = stream;
+          if (currentCallType === 'video') {
+            remoteVid.style.display = 'block';
+            const callScr = document.getElementById('callScreen');
+            if (callScr) callScr.classList.add('video-live');
+          }
+          remoteVid.play().catch(e => console.warn('remoteVid play err:', e));
         }
+        if (remoteAud) {
+          remoteAud.srcObject = stream;
+          remoteAud.play().catch(e => console.warn('remoteAud play err:', e));
+        }
+        startCallTimer();
+      };
+
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          const partner = isCallInitiator ? currentChatUserId : (incomingCallData ? incomingCallData.from : currentChatUserId);
+          if (partner) {
+            sendCallSignal('ice', partner, { candidate: event.candidate, callId: currentCallId });
+          }
+          if (currentCallId) {
+            try { db.ref('calls/' + currentCallId + '/iceCandidates').push(JSON.stringify(event.candidate)); } catch (e) {}
+          }
+        }
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        if (peerConnection) {
+          const state = peerConnection.connectionState;
+          if (state === 'connected') {
+            callConnected = true;
+            stopRingingAudio();
+          } else if (state === 'disconnected' || state === 'failed') {
+            endCall();
+          }
+        }
+      };
+
+      if (isOffer) {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        const partner = currentChatUserId;
+        sendCallSignal('offer', partner, { sdp: offer, callId: currentCallId });
         if (currentCallId) {
-          try { db.ref('calls/' + currentCallId + '/iceCandidates').push(JSON.stringify(event.candidate)); } catch (e) {}
+          try { db.ref('calls/' + currentCallId + '/offer').set(JSON.stringify(offer)); } catch (e) {}
         }
       }
-    };
-
-    peerConnection.onconnectionstatechange = () => {
-      if (peerConnection) {
-        const state = peerConnection.connectionState;
-        if (state === 'connected') {
-          callConnected = true;
-          stopRingingAudio();
-        } else if (state === 'disconnected' || state === 'failed') {
-          endCall();
-        }
-      }
-    };
-
-    if (isOffer) {
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      const partner = currentChatUserId;
-      sendCallSignal('offer', partner, { sdp: offer, callId: currentCallId });
-      if (currentCallId) {
-        try { db.ref('calls/' + currentCallId + '/offer').set(JSON.stringify(offer)); } catch (e) {}
-      }
+    } catch (e) {
+      console.error('setupWebRTC error:', e);
+      showToast('Camera/Microphone permission denied or unavailable');
+      stopRingingAudio();
+      endCallCleanup();
+    } finally {
+      webrtcInitPromise = null;
     }
-  } catch (e) {
-    console.error('setupWebRTC error:', e);
-    showToast('Camera/Microphone permission denied or unavailable');
-    stopRingingAudio();
-    endCallCleanup();
-  }
+  })();
+  return webrtcInitPromise;
 }
 
 function startCallTimer() {
@@ -3965,7 +4011,8 @@ function endCallCleanup() {
   if (content) content.style.opacity = '1';
 
   const callScreen = document.getElementById('callScreen');
-  if (callScreen) { callScreen.classList.remove('show'); callScreen.style.display = 'none'; }
+  if (callScreen) { callScreen.classList.remove('show', 'video-live'); callScreen.style.display = 'none'; }
+  webrtcInitPromise = null;
 
   const incCall = document.getElementById('incomingCall');
   if (incCall) { incCall.classList.remove('show'); incCall.style.display = 'none'; }
