@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Connectly</title>
+<title>Chat me</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
 <style>
@@ -874,8 +874,8 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 <div id="setupScreen">
   <div class="setup-card">
     <div class="setup-logo"><span class="material-icons">chat</span></div>
-    <h1>Connectly</h1>
-    <p>Create your unique Connectly ID to start messaging</p>
+    <h1>Chat me</h1>
+    <p>Create your unique Chat me ID to start messaging</p>
     <input type="text" id="setupIdInput" class="setup-input" placeholder="Choose your ID (e.g. faraz123)" maxlength="30" autocomplete="off">
     <input type="text" id="setupNameInput" class="setup-input" placeholder="Display Name (e.g. Faraz Ahmed)" maxlength="50" autocomplete="off">
     <button id="setupBtn" class="setup-btn" onclick="handleSetup()">Start Messaging</button>
@@ -887,7 +887,7 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 <div id="mainApp" class="app-container">
   <!-- Header -->
   <div class="header">
-    <h1>Connectly</h1>
+    <h1>Chat me</h1>
     <div class="header-actions">
       <button class="header-btn" onclick="openSearchModal()" title="Search Users"><span class="material-icons">search</span></button>
     </div>
@@ -1258,8 +1258,8 @@ if (!isFirebaseActive || !db) {
 
   const initialStore = {
     users: {
-      'faraz123': { id: 'faraz123', name: 'Faraz Ahmed (Owner)', bio: 'Connectly Founder 🚀', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
-      'ahmed456': { id: 'ahmed456', name: 'Ahmed Khan', bio: 'Exploring Connectly ✨', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
+      'faraz123': { id: 'faraz123', name: 'Faraz Ahmed (Owner)', bio: 'Chat me Founder 🚀', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
+      'ahmed456': { id: 'ahmed456', name: 'Ahmed Khan', bio: 'Exploring Chat me ✨', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
       'jerry': { id: 'jerry', name: 'Jerry Developer', bio: 'Tech lover 💻', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} }
     },
     conversations: {},
@@ -1399,7 +1399,7 @@ if (!isFirebaseActive || !db) {
     try {
       cloudWs = new WebSocket('wss://ntfy.sh/' + CLOUD_SYNC_TOPIC + '/ws?since=24h');
       cloudWs.onopen = () => {
-        console.log('Connectly Cloud Mesh connected ☁️');
+        console.log('Chat me Cloud Mesh connected ☁️');
         const st = document.getElementById('fbStatusSub');
         if (st && !isFirebaseActive) {
           st.textContent = 'Status: Cloud Mesh Live 🟢 (Realtime Cross-Device)';
@@ -2361,7 +2361,7 @@ function handleChatMediaSelect(event) {
     const img = new Image();
     const reader = new FileReader();
     reader.onload = function(e) {
-      img.onload = function() {
+      img.onload = async function() {
         const canvas = document.createElement('canvas');
         let width = img.width;
         let height = img.height;
@@ -2380,7 +2380,17 @@ function handleChatMediaSelect(event) {
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
         const compressedBase64 = canvas.toDataURL('image/jpeg', 0.8);
-        pendingMedia = { type: 'image', data: compressedBase64, name: file.name };
+        
+        // Try to upload photo to ntfy.sh for smaller sync payload
+        let photoSrc = compressedBase64;
+        try {
+          const photoBlob = await (await fetch(compressedBase64)).blob();
+          const uploadUrl = await uploadMediaFile(photoBlob, file.name || 'photo.jpg');
+          if (uploadUrl) photoSrc = uploadUrl;
+        } catch (ue) {
+          console.warn('Photo upload failed, using base64:', ue);
+        }
+        pendingMedia = { type: 'image', data: photoSrc, name: file.name };
 
         const thumb = document.getElementById('imgPreviewThumb');
         thumb.src = compressedBase64;
@@ -2469,26 +2479,41 @@ async function startVoiceRecord() {
       const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
       const duration = voiceRecordSeconds || 1;
 
-      const reader = new FileReader();
-      reader.onload = async function(e) {
-        const base64Audio = e.target.result;
-        const convId = currentConversationId;
-        const msgData = {
-          senderId: currentUserId,
-          audio: base64Audio,
-          audioDuration: duration,
-          timestamp: Date.now()
-        };
-        const msgRef = db.ref('messages/' + convId).push();
-        await msgRef.set(msgData);
-        await db.ref('conversations/' + convId).update({
-          lastMessage: '🎤 Voice message (' + formatAudioDuration(duration) + ')',
-          lastMessageTime: Date.now()
+      // Upload audio to ntfy.sh for cross-device streaming (small URL instead of large base64)
+      let audioSrc = null;
+      try {
+        const uploadUrl = await uploadMediaFile(audioBlob, 'voice_' + Date.now() + '.webm');
+        if (uploadUrl) {
+          audioSrc = uploadUrl;
+        }
+      } catch (ue) {
+        console.warn('Voice upload failed, falling back to base64:', ue);
+      }
+
+      // Fallback to base64 if upload fails
+      if (!audioSrc) {
+        audioSrc = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = (e) => resolve(e.target.result);
+          reader.readAsDataURL(audioBlob);
         });
-        const otherUid = currentChatUserId;
-        db.ref('conversations/' + convId + '/unread/' + otherUid).transaction(val => (val || 0) + 1);
+      }
+
+      const convId = currentConversationId;
+      const msgData = {
+        senderId: currentUserId,
+        audio: audioSrc,
+        audioDuration: duration,
+        timestamp: Date.now()
       };
-      reader.readAsDataURL(audioBlob);
+      const msgRef = db.ref('messages/' + convId).push();
+      await msgRef.set(msgData);
+      await db.ref('conversations/' + convId).update({
+        lastMessage: '🎤 Voice message (' + formatAudioDuration(duration) + ')',
+        lastMessageTime: Date.now()
+      });
+      const otherUid = currentChatUserId;
+      db.ref('conversations/' + convId + '/unread/' + otherUid).transaction(val => (val || 0) + 1);
     };
 
     mediaRecorder.start(250);
@@ -3050,7 +3075,7 @@ function handleStatusFileSelect(event) {
     const reader = new FileReader();
     reader.onload = function(e) {
       const img = new Image();
-      img.onload = function() {
+      img.onload = async function() {
         const canvas = document.createElement('canvas');
         let width = img.width;
         let height = img.height;
@@ -3069,10 +3094,17 @@ function handleStatusFileSelect(event) {
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
         const comp = canvas.toDataURL('image/jpeg', 0.72);
-        statusFileData = comp;
+        // Upload status photo to ntfy for smaller sync payload
+        let statusSrc = comp;
+        try {
+          const photoBlob = await (await fetch(comp)).blob();
+          const uploadUrl = await uploadMediaFile(photoBlob, 'status_' + Date.now() + '.jpg');
+          if (uploadUrl) statusSrc = uploadUrl;
+        } catch (ue) { console.warn('Status photo upload failed:', ue); }
+        statusFileData = statusSrc;
         statusFileType = 'image';
         const preview = document.getElementById('statusUploadPreview');
-        preview.innerHTML = `<img src="${statusFileData}" style="max-width:100%;max-height:100%">`;
+        preview.innerHTML = `<img src="${comp}" style="max-width:100%;max-height:100%">`;
         document.getElementById('statusUpload').classList.add('show');
         document.getElementById('statusUpload').style.display = 'flex';
         showToast('Photo ready! Add caption and tap Send');

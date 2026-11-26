@@ -1,5 +1,5 @@
 {
-  "name": "connectly",
+  "name": "chat-me",
   "version": "1.0.0",
   "description": "Modern Real-Time Messaging & Social Communication Platform",
   "main": "server.js",
@@ -14,8 +14,8 @@
     "websocket",
     "social",
     "stories",
-    "connectly"
+    "chat-me"
   ],
-  "author": "Connectly Team",
+  "author": "Chat me Team",
   "license": "MIT"
 }
