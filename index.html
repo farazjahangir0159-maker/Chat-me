@@ -900,10 +900,11 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
       <div class="search-bar">
         <div class="search-input-wrap">
           <span class="material-icons">search</span>
-          <input type="text" id="chatSearchInput" placeholder="Search chats..." oninput="filterChats(this.value)">
+          <input type="text" id="chatSearchInput" placeholder="Search users by ID or chats..." oninput="filterChats(this.value)">
         </div>
       </div>
       <div id="chatList"></div>
+      <div id="frontUserSearchResults"></div>
       <div id="chatEmptyState" class="empty-state" style="display:none;">
         <span class="material-icons">forum</span>
         <h3>No conversations yet</h3>
@@ -984,8 +985,8 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
         <div class="settings-item" onclick="handleLogout()">
           <div class="icon-wrap" style="background:#EF4444"><span class="material-icons">logout</span></div>
           <div class="settings-item-info">
-            <div class="settings-item-title">Logout</div>
-            <div class="settings-item-sub">Clear local data and sign out</div>
+            <div class="settings-item-title">Logout &amp; Delete ID</div>
+            <div class="settings-item-sub">Permanently delete this ID and start fresh</div>
           </div>
           <span class="material-icons" style="color:var(--text-muted)">chevron_right</span>
         </div>
@@ -1028,6 +1029,7 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
       <button id="chatPartnerStatusBtn" onclick="viewStatus(currentChatUserId)" title="View Status" style="display:none;background:rgba(255,215,0,0.2);color:#FFD700"><span class="material-icons">donut_large</span></button>
       <button onclick="startCall('audio')" title="Audio Call"><span class="material-icons">call</span></button>
       <button onclick="startCall('video')" title="Video Call"><span class="material-icons">videocam</span></button>
+      <button onclick="deleteChat(currentConversationId, document.getElementById('chatHeaderName').textContent)" title="Delete Chat" style="color:#ffdddd"><span class="material-icons">delete_outline</span></button>
     </div>
   </div>
   <div class="messages-container" id="messagesContainer"></div>
@@ -1250,11 +1252,18 @@ try {
   console.warn("Firebase init skipped, running in local fallback mode:", e);
 }
 
-// ===== RESILIENT CLOUD REALTIME MESH + MOCK DB =====
+// ===== RESILIENT CLOUD REALTIME MESH + MOCK DB (v3 Fresh) =====
 if (!isFirebaseActive || !db) {
-  const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('connectly_rt_sync') : null;
-  const CLOUD_SYNC_TOPIC = 'connectly_faraz_mesh_v2';
+  const STORE_KEY = 'chatme_local_store_v3';
+  const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('chatme_rt_sync_v3') : null;
+  const CLOUD_SYNC_TOPIC = 'chatme_faraz_mesh_v3';
   const CLIENT_INSTANCE_ID = 'inst_' + Math.random().toString(36).substring(2, 10);
+
+  // Clean up legacy v1/v2 data so all old IDs and stale chats are cleared
+  try {
+    localStorage.removeItem('connectly_local_store');
+    localStorage.removeItem('connectly_user_id');
+  } catch (e) {}
 
   const initialStore = {
     users: {},
@@ -1267,19 +1276,20 @@ if (!isFirebaseActive || !db) {
 
   let localData = null;
   try {
-    const raw = localStorage.getItem('connectly_local_store');
+    const raw = localStorage.getItem(STORE_KEY);
     if (raw) localData = JSON.parse(raw);
   } catch (e) {}
 
   if (!localData || !localData.users) {
     localData = initialStore;
-    try { localStorage.setItem('connectly_local_store', JSON.stringify(localData)); } catch (e) {}
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(localData)); } catch (e) {}
   }
 
-  const listeners = new Map();
+  const listeners = new Map(); // path -> Set of { wrapper, queryParams, event }
+  const pendingSyncs = new Set();
 
   function saveStore() {
-    try { localStorage.setItem('connectly_local_store', JSON.stringify(localData)); } catch (e) {}
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(localData)); } catch (e) {}
   }
 
   function getPathParts(path) {
@@ -1310,23 +1320,64 @@ if (!isFirebaseActive || !db) {
     cur[parts[parts.length - 1]] = value;
   }
 
-  function notifyLocal(path) {
+  function applyQuery(rawVal, queryParams) {
+    let val = rawVal;
+    const q = queryParams || {};
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      let entries = Object.entries(val);
+      if (q.orderByKey) {
+        if (q.equalToVal !== undefined) {
+          entries = entries.filter(([k, v]) => {
+            if (!v || typeof v !== 'object') return false;
+            const subParts = q.orderByKey.split('/');
+            let target = v;
+            for (const sp of subParts) {
+              if (target === undefined || target === null) break;
+              target = target[sp];
+            }
+            return target === q.equalToVal;
+          });
+        }
+        if (q.startAtVal !== undefined) {
+          entries = entries.filter(([k, v]) => (v && v[q.orderByKey] >= q.startAtVal));
+        }
+        if (q.endAtVal !== undefined) {
+          entries = entries.filter(([k, v]) => (v && v[q.orderByKey] <= q.endAtVal));
+        }
+      }
+      if (q.limitToLastN) {
+        entries = entries.slice(-q.limitToLastN);
+      }
+      if (q.limitToFirstN) {
+        entries = entries.slice(0, q.limitToFirstN);
+      }
+      val = Object.fromEntries(entries);
+    }
+    return val;
+  }
+
+  function buildSnap(val, lastKey) {
+    return {
+      exists: () => val !== undefined && val !== null && (typeof val !== 'object' || Object.keys(val).length > 0),
+      val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
+      key: lastKey || null
+    };
+  }
+
+  function notifyLocal(path, broadcastTab = true) {
     saveStore();
-    for (const [key, cbs] of listeners.entries()) {
+    for (const [key, entries] of listeners.entries()) {
       if (key === path || path.startsWith(key + '/') || key.startsWith(path + '/')) {
         const parts = getPathParts(key);
-        const val = getNode(parts);
-        const snap = {
-          exists: () => val !== undefined && val !== null && (typeof val !== 'object' || Object.keys(val).length > 0),
-          val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
-          key: parts[parts.length - 1] || null
-        };
-        for (const cb of cbs) {
-          try { cb(snap); } catch (e) { console.error(e); }
+        const rawVal = getNode(parts);
+        for (const entry of entries) {
+          const filtered = applyQuery(rawVal, entry.queryParams);
+          const snap = buildSnap(filtered, parts[parts.length - 1]);
+          try { entry.wrapper(snap); } catch (e) { console.error(e); }
         }
       }
     }
-    if (syncChannel) {
+    if (broadcastTab && syncChannel) {
       syncChannel.postMessage({ type: 'STORE_UPDATED', path });
     }
   }
@@ -1361,14 +1412,26 @@ if (!isFirebaseActive || !db) {
         val: val,
         time: Date.now()
       };
-      fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC, {
+      const p = fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC, {
         method: 'POST',
-        headers: { 'Title': 'ConnectlySync' },
+        headers: { 'Title': 'ChatMeSync' },
         body: JSON.stringify(payload)
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => pendingSyncs.delete(p));
+      pendingSyncs.add(p);
+      return p;
     } catch (e) {}
+    return Promise.resolve();
   }
   window.syncToCloud = syncToCloud;
+
+  async function flushCloudSync() {
+    if (pendingSyncs.size === 0) return;
+    await Promise.race([
+      Promise.allSettled(Array.from(pendingSyncs)),
+      new Promise(r => setTimeout(r, 2500))
+    ]);
+  }
+  window.flushCloudSync = flushCloudSync;
 
   function sendCallSignal(action, to, extraData = {}) {
     try {
@@ -1470,23 +1533,12 @@ if (!isFirebaseActive || !db) {
                 const nameEl = document.getElementById('chatHeaderName');
                 if (nameEl && u.name) nameEl.textContent = u.name;
               }
+              if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
             }
             notifyLocal(data.path);
             if (data.path.startsWith('stories')) {
-              if (typeof loadStatuses === 'function') loadStatuses();
               if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
               if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
-            }
-            // Refresh chat list when conversation data arrives
-            if (data.path.startsWith('conversations')) {
-              if (typeof loadConversations === 'function') loadConversations();
-            }
-            // Refresh messages if we're viewing this conversation
-            if (data.path.startsWith('messages/') && currentConversationId) {
-              const msgConvId = data.path.split('/')[1];
-              if (msgConvId === currentConversationId) {
-                if (typeof loadMessages === 'function') loadMessages(currentConversationId);
-              }
             }
           } else if (data.op === 'update') {
             const parts = getPathParts(data.path);
@@ -1514,15 +1566,12 @@ if (!isFirebaseActive || !db) {
                 const nameEl = document.getElementById('chatHeaderName');
                 if (nameEl && u.name) nameEl.textContent = u.name;
               }
+              if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
             }
             notifyLocal(data.path);
             if (data.path.startsWith('stories')) {
-              if (typeof loadStatuses === 'function') loadStatuses();
               if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
               if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
-            }
-            if (data.path.startsWith('conversations')) {
-              if (typeof loadConversations === 'function') loadConversations();
             }
           } else if (data.op === 'remove') {
             const parts = getPathParts(data.path);
@@ -1532,7 +1581,19 @@ if (!isFirebaseActive || !db) {
                 delete parent[parts[parts.length - 1]];
               }
             }
+            if (data.path.startsWith('users/')) {
+              const uid = data.path.split('/')[1];
+              delete usersCache[uid];
+              if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
+            }
+            if (data.path.startsWith('conversations/') && currentConversationId === data.path.split('/')[1]) {
+              if (typeof closeChatView === 'function') closeChatView();
+            }
             notifyLocal(data.path);
+            if (data.path.startsWith('stories')) {
+              if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
+              if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
+            }
           } else if (data.op === 'query') {
             if (currentUserId && currentUserData) {
               syncToCloud('update', 'users/' + currentUserId, currentUserData);
@@ -1577,9 +1638,9 @@ if (!isFirebaseActive || !db) {
     syncChannel.onmessage = (e) => {
       if (e.data && e.data.type === 'STORE_UPDATED') {
         try {
-          const raw = localStorage.getItem('connectly_local_store');
+          const raw = localStorage.getItem(STORE_KEY);
           if (raw) localData = JSON.parse(raw);
-          notifyLocal(e.data.path);
+          notifyLocal(e.data.path, false);
         } catch (err) {}
       }
     };
@@ -1628,46 +1689,9 @@ if (!isFirebaseActive || !db) {
 
       once(event) {
         const parts = getPathParts(normPath);
-        let val = getNode(parts);
-        
-        if (val && typeof val === 'object' && !Array.isArray(val)) {
-          let entries = Object.entries(val);
-          const q = this.queryParams;
-          if (q.orderByKey) {
-            if (q.equalToVal !== undefined) {
-              entries = entries.filter(([k, v]) => {
-                if (!v || typeof v !== 'object') return false;
-                const subParts = q.orderByKey.split('/');
-                let target = v;
-                for (const sp of subParts) {
-                  if (target === undefined || target === null) break;
-                  target = target[sp];
-                }
-                return target === q.equalToVal;
-              });
-            }
-            if (q.startAtVal !== undefined) {
-              entries = entries.filter(([k, v]) => (v && v[q.orderByKey] >= q.startAtVal));
-            }
-            if (q.endAtVal !== undefined) {
-              entries = entries.filter(([k, v]) => (v && v[q.orderByKey] <= q.endAtVal));
-            }
-          }
-          if (q.limitToLastN) {
-            entries = entries.slice(-q.limitToLastN);
-          }
-          if (q.limitToFirstN) {
-            entries = entries.slice(0, q.limitToFirstN);
-          }
-          val = Object.fromEntries(entries);
-        }
-
-        const snap = {
-          exists: () => val !== undefined && val !== null && (typeof val !== 'object' || Object.keys(val).length > 0),
-          val: () => (val === undefined ? null : JSON.parse(JSON.stringify(val))),
-          key: parts[parts.length - 1] || null
-        };
-        return Promise.resolve(snap);
+        const rawVal = getNode(parts);
+        const val = applyQuery(rawVal, this.queryParams);
+        return Promise.resolve(buildSnap(val, parts[parts.length - 1]));
       },
 
       on(event, callback) {
@@ -1686,7 +1710,8 @@ if (!isFirebaseActive || !db) {
             callback(snap);
           }
         };
-        listeners.get(normPath).add(wrapper);
+        const entry = { wrapper, queryParams: { ...this.queryParams }, event };
+        listeners.get(normPath).add(entry);
         this.once(event).then(snap => {
           try { wrapper(snap); } catch (e) {}
         });
@@ -1696,7 +1721,12 @@ if (!isFirebaseActive || !db) {
       off(event, callback) {
         if (!listeners.has(normPath)) return;
         if (callback) {
-          listeners.get(normPath).delete(callback);
+          const set = listeners.get(normPath);
+          for (const entry of Array.from(set)) {
+            if (entry.wrapper === callback || entry === callback) {
+              set.delete(entry);
+            }
+          }
         } else {
           listeners.delete(normPath);
         }
@@ -1836,8 +1866,10 @@ const ICE_SERVERS = {
 };
 
 // ===== INIT =====
+const USER_ID_KEY = 'chatme_user_id_v3';
+
 function init() {
-  const savedId = localStorage.getItem('connectly_user_id');
+  const savedId = localStorage.getItem(USER_ID_KEY);
   const savedTheme = localStorage.getItem('connectly_theme');
   if (savedTheme === 'dark') {
     document.documentElement.setAttribute('data-theme', 'dark');
@@ -1851,7 +1883,7 @@ function init() {
         currentUserData = snap.val();
         showMainApp();
       } else {
-        localStorage.removeItem('connectly_user_id');
+        localStorage.removeItem(USER_ID_KEY);
         showSetup();
       }
     }).catch(() => showSetup());
@@ -1901,7 +1933,7 @@ async function handleSetup() {
       currentUserId = userId;
       currentUserData = userData;
     }
-    localStorage.setItem('connectly_user_id', currentUserId);
+    localStorage.setItem(USER_ID_KEY, currentUserId);
     showMainApp();
   } catch (e) {
     errEl.textContent = 'Connection error. Check Firebase config.';
@@ -2007,8 +2039,12 @@ function getConversationId(uid1, uid2) {
   return [uid1, uid2].sort().join('_');
 }
 
+let conversationsListener = null;
 function loadConversations() {
-  db.ref('conversations').orderByChild('participants/' + currentUserId).equalTo(true).on('value', async snap => {
+  if (conversationsListener) {
+    db.ref('conversations').off('value', conversationsListener);
+  }
+  conversationsListener = db.ref('conversations').orderByChild('participants/' + currentUserId).equalTo(true).on('value', async snap => {
     const data = snap.val() || {};
     conversations = data;
     await renderChatList(data);
@@ -2018,8 +2054,14 @@ function loadConversations() {
 async function renderChatList(convos) {
   const list = document.getElementById('chatList');
   const empty = document.getElementById('chatEmptyState');
-  const entries = Object.entries(convos);
-  if (entries.length === 0) { list.innerHTML = ''; empty.style.display = 'flex'; return; }
+  const searchVal = (document.getElementById('chatSearchInput')?.value || '').trim();
+  const entries = Object.entries(convos).filter(([, conv]) => conv && conv.participants && conv.participants[currentUserId] === true);
+  if (entries.length === 0) {
+    list.innerHTML = '';
+    empty.style.display = searchVal ? 'none' : 'flex';
+    updateChatBadge();
+    return;
+  }
   empty.style.display = 'none';
 
   // Fetch recent stories to display status rings on chat partners
@@ -2058,18 +2100,23 @@ async function renderChatList(convos) {
       <div class="chat-meta">
         <div class="chat-time">${time}</div>
         ${unread > 0 ? `<div class="chat-unread" style="display:flex">${unread}</div>` : ''}
-        <button onclick="event.stopPropagation();deleteChat('${convId}','${escHtml(user.name || otherUid)}')" style="margin-top:4px;padding:2px;color:var(--danger);opacity:0.6" title="Delete chat"><span class="material-icons" style="font-size:16px">delete</span></button>
+        <button onclick="event.stopPropagation();deleteChat('${convId}','${escHtml(user.name || otherUid)}')" style="margin-top:4px;padding:2px;color:var(--danger);opacity:0.7" title="Delete chat"><span class="material-icons" style="font-size:17px">delete</span></button>
       </div>
     </div>`;
   }
   list.innerHTML = html;
   updateChatBadge();
+  if (searchVal) filterChats(searchVal);
 }
 
 // Delete a conversation and its messages
 async function deleteChat(convId, userName) {
+  if (!convId) return;
   if (!confirm('Delete chat with ' + userName + '? All messages will be permanently deleted.')) return;
   try {
+    if (currentConversationId === convId) {
+      closeChatView();
+    }
     await db.ref('messages/' + convId).remove();
     await db.ref('conversations/' + convId).remove();
     showToast('Chat deleted');
@@ -2081,20 +2128,47 @@ async function deleteChat(convId, userName) {
 function updateChatBadge() {
   let total = 0;
   for (const conv of Object.values(conversations)) {
-    if (conv.unread && conv.unread[currentUserId]) total += conv.unread[currentUserId];
+    if (conv && conv.participants && conv.participants[currentUserId] && conv.unread && conv.unread[currentUserId]) {
+      total += conv.unread[currentUserId];
+    }
   }
   const badge = document.getElementById('chatsBadge');
   if (total > 0) { badge.textContent = total > 99 ? '99+' : total; badge.style.display = 'flex'; }
   else { badge.style.display = 'none'; }
 }
 
+let frontSearchDebounce = null;
 function filterChats(query) {
   const items = document.querySelectorAll('#chatList .chat-item');
-  const q = query.toLowerCase();
+  const raw = (query || '').trim();
+  const q = raw.toLowerCase().replace(/^@+/, '');
   items.forEach(item => {
     const name = item.querySelector('.chat-name').textContent.toLowerCase();
-    item.style.display = name.includes(q) ? '' : 'none';
+    item.style.display = (!q || name.includes(q)) ? '' : 'none';
   });
+
+  const frontRes = document.getElementById('frontUserSearchResults');
+  const empty = document.getElementById('chatEmptyState');
+  clearTimeout(frontSearchDebounce);
+
+  if (!q) {
+    if (frontRes) frontRes.innerHTML = '';
+    if (empty && items.length === 0) empty.style.display = 'flex';
+    return;
+  }
+
+  if (empty) empty.style.display = 'none';
+  if (frontRes) {
+    frontRes.innerHTML = '<div style="padding:12px 16px;font-size:12px;color:var(--text-secondary)">Searching users on Chat me...</div>';
+  }
+
+  frontSearchDebounce = setTimeout(async () => {
+    if (typeof syncToCloud === 'function') {
+      syncToCloud('query', 'users', { search: q });
+    }
+    await new Promise(r => setTimeout(r, 600));
+    await renderUserSearchResults(q, 'frontUserSearchResults', false);
+  }, 250);
 }
 
 // ===== USER DATA =====
@@ -2353,12 +2427,13 @@ async function sendMessage() {
     else if (msgData.image) preview = '📷 Photo';
   }
 
+  const otherUid = currentChatUserId;
   await db.ref('conversations/' + convId).update({
+    participants: { [currentUserId]: true, [otherUid]: true },
     lastMessage: preview,
     lastMessageTime: Date.now()
   });
 
-  const otherUid = currentChatUserId;
   db.ref('conversations/' + convId + '/unread/' + otherUid).transaction(val => (val || 0) + 1);
   updateSendVoiceBtnVisibility();
 }
@@ -2547,6 +2622,7 @@ async function startVoiceRecord() {
       }
 
       const convId = currentConversationId;
+      const otherUid = currentChatUserId;
       const msgData = {
         senderId: currentUserId,
         audio: audioSrc,
@@ -2556,10 +2632,10 @@ async function startVoiceRecord() {
       const msgRef = db.ref('messages/' + convId).push();
       await msgRef.set(msgData);
       await db.ref('conversations/' + convId).update({
+        participants: { [currentUserId]: true, [otherUid]: true },
         lastMessage: '🎤 Voice message (' + formatAudioDuration(duration) + ')',
         lastMessageTime: Date.now()
       });
-      const otherUid = currentChatUserId;
       db.ref('conversations/' + convId + '/unread/' + otherUid).transaction(val => (val || 0) + 1);
     };
 
@@ -2780,6 +2856,7 @@ function insertEmoji(emoji) {
 async function sendStickerMessage(stickerEmoji) {
   closeEmojiStickerTray();
   const convId = currentConversationId;
+  const otherUid = currentChatUserId;
   const msgData = {
     senderId: currentUserId,
     sticker: stickerEmoji,
@@ -2788,10 +2865,10 @@ async function sendStickerMessage(stickerEmoji) {
   const msgRef = db.ref('messages/' + convId).push();
   await msgRef.set(msgData);
   await db.ref('conversations/' + convId).update({
+    participants: { [currentUserId]: true, [otherUid]: true },
     lastMessage: '🎨 Sticker ' + stickerEmoji,
     lastMessageTime: Date.now()
   });
-  const otherUid = currentChatUserId;
   db.ref('conversations/' + convId + '/unread/' + otherUid).transaction(val => (val || 0) + 1);
 }
 
@@ -2830,40 +2907,36 @@ function closeSearchModal() {
 }
 
 let searchDebounce = null;
-function searchUsers(query) {
-  clearTimeout(searchDebounce);
-  if (!query.trim()) { document.getElementById('searchResults').innerHTML = ''; return; }
-  searchDebounce = setTimeout(async () => {
-    const q = query.trim().toLowerCase();
-    
-    // First, ask other devices to broadcast their user data via Cloud Mesh
-    if (typeof syncToCloud === 'function') {
-      syncToCloud('query', 'users', { search: q });
-    }
-    
-    // Wait a moment for Cloud Mesh responses to arrive
-    await new Promise(r => setTimeout(r, 800));
-    
-    try {
-      const snap = await db.ref('users').once('value');
-      const allUsers = snap.val() || {};
-      const results = Object.entries(allUsers).filter(([uid, u]) =>
-        uid !== currentUserId && (uid.includes(q) || (u.name && u.name.toLowerCase().includes(q)))
-      ).slice(0, 20);
-      let html = '';
-      if (results.length === 0) {
-        html = `<div class="empty-state">
-          <span class="material-icons">person_search</span>
-          <p>No user found with "@${escHtml(q)}"</p>
-          <p style="font-size:12px;color:var(--text-muted);margin-top:4px">Make sure the other person has created their ID first</p>
-        </div>`;
+
+async function renderUserSearchResults(q, targetElId, fromModal) {
+  const targetEl = document.getElementById(targetElId);
+  if (!targetEl) return;
+  try {
+    const snap = await db.ref('users').once('value');
+    const allUsers = snap.val() || {};
+    const results = Object.entries(allUsers).filter(([uid, u]) =>
+      uid !== currentUserId && u && (uid.toLowerCase().includes(q) || (u.name && u.name.toLowerCase().includes(q)))
+    ).slice(0, 20);
+    let html = '';
+    if (results.length === 0) {
+      html = `<div class="empty-state" style="padding:24px 16px">
+        <span class="material-icons">person_search</span>
+        <p>No user found with "@${escHtml(q)}"</p>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:4px">Make sure the other person has created their ID first</p>
+      </div>`;
+    } else {
+      if (!fromModal) {
+        html += `<div style="padding:10px 16px 4px;font-size:12px;font-weight:600;color:var(--primary);text-transform:uppercase">Users on Chat me</div>`;
       }
       for (const [uid, u] of results) {
         const letter = (u.name || uid)[0].toUpperCase();
         const avatarContent = u.avatar ? `<img src="${u.avatar}">` : letter;
         const pres = await getPresence(uid);
         const onlineDot = pres.online ? '<div class="online-dot"></div>' : '';
-        html += `<div class="chat-item" onclick="closeSearchModal();openChat('${uid}')">
+        const clickHandler = fromModal
+          ? `closeSearchModal();openChat('${uid}')`
+          : `document.getElementById('chatSearchInput').value='';filterChats('');openChat('${uid}')`;
+        html += `<div class="chat-item" onclick="${clickHandler}">
           <div class="avatar">${avatarContent}${onlineDot}</div>
           <div class="chat-info">
             <div class="chat-name">${escHtml(u.name || uid)}</div>
@@ -2874,11 +2947,35 @@ function searchUsers(query) {
           </div>
         </div>`;
       }
-      document.getElementById('searchResults').innerHTML = html;
-    } catch (e) {
-      document.getElementById('searchResults').innerHTML = '<div class="empty-state"><p>Search error</p></div>';
     }
-  }, 300);
+    targetEl.innerHTML = html;
+  } catch (e) {
+    targetEl.innerHTML = '<div class="empty-state"><p>Search error</p></div>';
+  }
+}
+
+function searchUsers(query) {
+  clearTimeout(searchDebounce);
+  const q = (query || '').trim().toLowerCase().replace(/^@+/, '');
+  if (!q) { document.getElementById('searchResults').innerHTML = ''; return; }
+  document.getElementById('searchResults').innerHTML = '<div style="padding:16px;text-align:center;font-size:13px;color:var(--text-secondary)">Searching users...</div>';
+  searchDebounce = setTimeout(async () => {
+    if (typeof syncToCloud === 'function') {
+      syncToCloud('query', 'users', { search: q });
+    }
+    await new Promise(r => setTimeout(r, 700));
+    await renderUserSearchResults(q, 'searchResults', true);
+  }, 250);
+}
+
+function refreshActiveSearch() {
+  const modalOpen = document.getElementById('searchModal')?.classList.contains('show');
+  if (modalOpen) {
+    const q = (document.getElementById('userSearchInput')?.value || '').trim().toLowerCase().replace(/^@+/, '');
+    if (q) renderUserSearchResults(q, 'searchResults', true);
+  }
+  const frontQ = (document.getElementById('chatSearchInput')?.value || '').trim().toLowerCase().replace(/^@+/, '');
+  if (frontQ) renderUserSearchResults(frontQ, 'frontUserSearchResults', false);
 }
 
 // ===== PROFILE =====
@@ -3974,7 +4071,12 @@ async function handleLogout() {
   } catch (e) {
     console.error('Cleanup error:', e);
   }
-  // Clear all local storage for this app
+  // Clear all local storage for this app and wait for Cloud Mesh deletes to send
+  if (typeof flushCloudSync === 'function') {
+    await flushCloudSync();
+  }
+  localStorage.removeItem(USER_ID_KEY);
+  localStorage.removeItem('chatme_local_store_v3');
   localStorage.removeItem('connectly_user_id');
   localStorage.removeItem('connectly_local_store');
   // Remove all listeners
