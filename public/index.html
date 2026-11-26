@@ -1257,11 +1257,7 @@ if (!isFirebaseActive || !db) {
   const CLIENT_INSTANCE_ID = 'inst_' + Math.random().toString(36).substring(2, 10);
 
   const initialStore = {
-    users: {
-      'faraz123': { id: 'faraz123', name: 'Faraz Ahmed (Owner)', bio: 'Chat me Founder 🚀', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
-      'ahmed456': { id: 'ahmed456', name: 'Ahmed Khan', bio: 'Exploring Chat me ✨', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} },
-      'jerry': { id: 'jerry', name: 'Jerry Developer', bio: 'Tech lover 💻', avatar: '', online: true, lastSeen: Date.now(), followers: {}, following: {} }
-    },
+    users: {},
     conversations: {},
     messages: {},
     stories: {},
@@ -1372,6 +1368,7 @@ if (!isFirebaseActive || !db) {
       }).catch(() => {});
     } catch (e) {}
   }
+  window.syncToCloud = syncToCloud;
 
   function sendCallSignal(action, to, extraData = {}) {
     try {
@@ -1407,6 +1404,13 @@ if (!isFirebaseActive || !db) {
         }
         if (currentUserId && currentUserData) {
           syncToCloud('update', 'users/' + currentUserId, currentUserData);
+          // Broadcast our conversations to mesh so other device sees them
+          const allConvs = getNode(['conversations']) || {};
+          for (const [cid, conv] of Object.entries(allConvs)) {
+            if (conv && conv.participants && conv.participants[currentUserId]) {
+              syncToCloud('set', 'conversations/' + cid, conv);
+            }
+          }
           // Broadcast our active stories to mesh
           const cutoff = Date.now() - 24 * 60 * 60 * 1000;
           const allSt = getNode(['stories']) || {};
@@ -1415,6 +1419,8 @@ if (!isFirebaseActive || !db) {
               syncToCloud('set', 'stories/' + stId, st);
             }
           }
+          // Ask other devices to broadcast their data
+          syncToCloud('query', 'users', { request: 'sync' });
         }
       };
       cloudWs.onmessage = async (event) => {
@@ -1471,6 +1477,17 @@ if (!isFirebaseActive || !db) {
               if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
               if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
             }
+            // Refresh chat list when conversation data arrives
+            if (data.path.startsWith('conversations')) {
+              if (typeof loadConversations === 'function') loadConversations();
+            }
+            // Refresh messages if we're viewing this conversation
+            if (data.path.startsWith('messages/') && currentConversationId) {
+              const msgConvId = data.path.split('/')[1];
+              if (msgConvId === currentConversationId) {
+                if (typeof loadMessages === 'function') loadMessages(currentConversationId);
+              }
+            }
           } else if (data.op === 'update') {
             const parts = getPathParts(data.path);
             let cur = getNode(parts);
@@ -1504,6 +1521,9 @@ if (!isFirebaseActive || !db) {
               if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
               if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
             }
+            if (data.path.startsWith('conversations')) {
+              if (typeof loadConversations === 'function') loadConversations();
+            }
           } else if (data.op === 'remove') {
             const parts = getPathParts(data.path);
             if (parts.length > 0) {
@@ -1516,6 +1536,20 @@ if (!isFirebaseActive || !db) {
           } else if (data.op === 'query') {
             if (currentUserId && currentUserData) {
               syncToCloud('update', 'users/' + currentUserId, currentUserData);
+              // Also broadcast all conversations this user is part of
+              const allConvs = getNode(['conversations']) || {};
+              for (const [cid, conv] of Object.entries(allConvs)) {
+                if (conv && conv.participants && conv.participants[currentUserId]) {
+                  syncToCloud('set', 'conversations/' + cid, conv);
+                }
+              }
+              // Also broadcast messages in those conversations
+              const allMsgs = getNode(['messages']) || {};
+              for (const [cid, msgs] of Object.entries(allMsgs)) {
+                if (allConvs[cid] && allConvs[cid].participants && allConvs[cid].participants[currentUserId]) {
+                  syncToCloud('set', 'messages/' + cid, msgs);
+                }
+              }
               const cutoff = Date.now() - 24 * 60 * 60 * 1000;
               const allSt = getNode(['stories']) || {};
               for (const [stId, st] of Object.entries(allSt)) {
@@ -2015,7 +2049,7 @@ async function renderChatList(convos) {
     const statusClass = hasStory ? ' has-status' : '';
     const avatarClick = hasStory ? `onclick="event.stopPropagation();viewStatus('${otherUid}')" title="Tap to view status"` : '';
 
-    html += `<div class="chat-item" onclick="openChat('${otherUid}')">
+    html += `<div class="chat-item" onclick="openChat('${otherUid}')" style="position:relative">
       <div class="avatar${statusClass}" ${avatarClick}>${avatarContent}${onlineDot}</div>
       <div class="chat-info">
         <div class="chat-name">${escHtml(user.name || otherUid)}</div>
@@ -2024,11 +2058,24 @@ async function renderChatList(convos) {
       <div class="chat-meta">
         <div class="chat-time">${time}</div>
         ${unread > 0 ? `<div class="chat-unread" style="display:flex">${unread}</div>` : ''}
+        <button onclick="event.stopPropagation();deleteChat('${convId}','${escHtml(user.name || otherUid)}')" style="margin-top:4px;padding:2px;color:var(--danger);opacity:0.6" title="Delete chat"><span class="material-icons" style="font-size:16px">delete</span></button>
       </div>
     </div>`;
   }
   list.innerHTML = html;
   updateChatBadge();
+}
+
+// Delete a conversation and its messages
+async function deleteChat(convId, userName) {
+  if (!confirm('Delete chat with ' + userName + '? All messages will be permanently deleted.')) return;
+  try {
+    await db.ref('messages/' + convId).remove();
+    await db.ref('conversations/' + convId).remove();
+    showToast('Chat deleted');
+  } catch (e) {
+    showToast('Error deleting chat');
+  }
 }
 
 function updateChatBadge() {
@@ -2788,6 +2835,15 @@ function searchUsers(query) {
   if (!query.trim()) { document.getElementById('searchResults').innerHTML = ''; return; }
   searchDebounce = setTimeout(async () => {
     const q = query.trim().toLowerCase();
+    
+    // First, ask other devices to broadcast their user data via Cloud Mesh
+    if (typeof syncToCloud === 'function') {
+      syncToCloud('query', 'users', { search: q });
+    }
+    
+    // Wait a moment for Cloud Mesh responses to arrive
+    await new Promise(r => setTimeout(r, 800));
+    
     try {
       const snap = await db.ref('users').once('value');
       const allUsers = snap.val() || {};
@@ -2798,8 +2854,8 @@ function searchUsers(query) {
       if (results.length === 0) {
         html = `<div class="empty-state">
           <span class="material-icons">person_search</span>
-          <p>No user found in recent list</p>
-          <button class="primary-btn" style="margin-top:12px;padding:8px 16px;border-radius:20px;background:var(--primary);color:#fff" onclick="closeSearchModal();openChat('${escHtml(q)}')">Start Chat with @${escHtml(q)}</button>
+          <p>No user found with "@${escHtml(q)}"</p>
+          <p style="font-size:12px;color:var(--text-muted);margin-top:4px">Make sure the other person has created their ID first</p>
         </div>`;
       }
       for (const [uid, u] of results) {
@@ -2822,7 +2878,7 @@ function searchUsers(query) {
     } catch (e) {
       document.getElementById('searchResults').innerHTML = '<div class="empty-state"><p>Search error</p></div>';
     }
-  }, 200);
+  }, 300);
 }
 
 // ===== PROFILE =====
@@ -3888,17 +3944,45 @@ function closeImageViewer() {
   document.getElementById('imageViewer').style.display = 'none';
 }
 
-// ===== LOGOUT =====
-function handleLogout() {
-  if (!confirm('Are you sure you want to logout?')) return;
-  db.ref('presence/' + currentUserId).set({ online: false, lastSeen: Date.now() });
-  db.ref('users/' + currentUserId).update({ online: false, lastSeen: Date.now() });
+// ===== LOGOUT (Permanently Delete Account) =====
+async function handleLogout() {
+  if (!confirm('Are you sure? Your account and all chats will be permanently deleted!')) return;
+  try {
+    // Delete all conversations and messages involving this user
+    const convSnap = await db.ref('conversations').once('value');
+    const allConvs = convSnap.val() || {};
+    for (const [convId, conv] of Object.entries(allConvs)) {
+      if (conv.participants && conv.participants[currentUserId]) {
+        await db.ref('messages/' + convId).remove();
+        await db.ref('conversations/' + convId).remove();
+      }
+    }
+    // Delete stories by this user
+    const storySnap = await db.ref('stories').once('value');
+    const allStories = storySnap.val() || {};
+    for (const [stId, st] of Object.entries(allStories)) {
+      if (st && st.userId === currentUserId) {
+        await db.ref('stories/' + stId).remove();
+      }
+    }
+    // Delete call logs
+    await db.ref('callLogs/' + currentUserId).remove();
+    // Delete presence
+    await db.ref('presence/' + currentUserId).remove();
+    // Delete user record
+    await db.ref('users/' + currentUserId).remove();
+  } catch (e) {
+    console.error('Cleanup error:', e);
+  }
+  // Clear all local storage for this app
   localStorage.removeItem('connectly_user_id');
+  localStorage.removeItem('connectly_local_store');
   // Remove all listeners
-  db.ref('conversations').off();
-  db.ref('stories').off();
-  if (incomingCallListenerRef) db.ref('calls').off('child_added', incomingCallListenerRef);
-  if (currentUserId) db.ref('callLogs/' + currentUserId).off();
+  try {
+    db.ref('conversations').off();
+    db.ref('stories').off();
+    if (incomingCallListenerRef) db.ref('calls').off('child_added', incomingCallListenerRef);
+  } catch (e) {}
   currentUserId = null;
   currentUserData = null;
   conversations = {};
