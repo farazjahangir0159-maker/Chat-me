@@ -633,32 +633,10 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 .call-action-btn .material-icons { color: white; font-size: 28px; }
 .call-action-btn.mute { background: rgba(255,255,255,0.15); }
 .call-action-btn.speaker { background: rgba(255,255,255,0.15); }
-.call-action-btn.video-toggle { background: rgba(255,255,255,0.15); }
 .call-action-btn.end-call { background: var(--danger); }
 .call-action-btn:hover { transform: scale(1.1); }
 .call-action-btn.active { background: white; }
 .call-action-btn.active .material-icons { color: #333; }
-#localVideo, #remoteVideo {
-  display: none; border-radius: 12px; overflow: hidden;
-}
-#remoteVideo {
-  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0;
-}
-#localVideo {
-  position: absolute; top: 80px; right: 16px; width: 120px; height: 160px;
-  border-radius: 12px; z-index: 2; object-fit: cover; box-shadow: var(--shadow-lg);
-  transform: scaleX(-1);
-}
-#callScreen.video-live .call-avatar,
-#callScreen.video-live .call-screen-name {
-  display: none;
-}
-#callScreen.video-live .call-screen-content {
-  position: absolute; bottom: 36px; left: 0; right: 0; z-index: 3;
-}
-#callScreen.video-live .call-screen-status {
-  margin-bottom: 20px; text-shadow: 0 1px 6px rgba(0,0,0,0.8); color: #fff; font-weight: 600;
-}
 
 /* ===== SETTINGS TAB ===== */
 .settings-profile {
@@ -993,6 +971,14 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
           </div>
           <span class="material-icons" style="color:var(--text-muted)">chevron_right</span>
         </div>
+        <div class="settings-item" onclick="openSupabaseConfigPrompt()">
+          <div class="icon-wrap" style="background:#10B981"><span class="material-icons">cloud_upload</span></div>
+          <div class="settings-item-info">
+            <div class="settings-item-title">Supabase Storage &amp; Cloud</div>
+            <div class="settings-item-sub" id="sbStatusSub">Free Video Storage &amp; Realtime DB</div>
+          </div>
+          <span class="material-icons" style="color:var(--text-muted)">chevron_right</span>
+        </div>
         <div class="settings-item" onclick="handleLogout()">
           <div class="icon-wrap" style="background:#EF4444"><span class="material-icons">logout</span></div>
           <div class="settings-item-info">
@@ -1039,7 +1025,6 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
     <div class="chat-header-actions">
       <button id="chatPartnerStatusBtn" onclick="viewStatus(currentChatUserId)" title="View Status" style="display:none;background:rgba(255,215,0,0.2);color:#FFD700"><span class="material-icons">donut_large</span></button>
       <button onclick="startCall('audio')" title="Audio Call"><span class="material-icons">call</span></button>
-      <button onclick="startCall('video')" title="Video Call"><span class="material-icons">videocam</span></button>
       <button onclick="deleteChat(currentConversationId, document.getElementById('chatHeaderName').textContent)" title="Delete Chat" style="color:#ffdddd"><span class="material-icons">delete_outline</span></button>
     </div>
   </div>
@@ -1193,9 +1178,7 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 <!-- ===== CALL SCREEN ===== -->
 <div id="callScreen">
   <div class="call-screen-bg"></div>
-  <video id="remoteVideo" autoplay playsinline></video>
   <audio id="remoteAudio" autoplay playsinline></audio>
-  <video id="localVideo" autoplay playsinline muted></video>
   <div class="call-screen-content">
     <div class="call-avatar" id="callScreenAvatar"><span id="callScreenAvatarText"></span></div>
     <div class="call-screen-name" id="callScreenName"></div>
@@ -1203,7 +1186,6 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
     <div class="call-actions-bar">
       <button class="call-action-btn mute" id="muteBtn" onclick="toggleMute()"><span class="material-icons">mic</span></button>
       <button class="call-action-btn speaker" id="speakerBtn" onclick="toggleSpeaker()"><span class="material-icons">volume_up</span></button>
-      <button class="call-action-btn video-toggle" id="videoToggleBtn" onclick="toggleVideo()"><span class="material-icons">videocam</span></button>
       <button class="call-action-btn end-call" onclick="endCall()"><span class="material-icons">call_end</span></button>
     </div>
   </div>
@@ -1230,6 +1212,10 @@ input, textarea { outline: none; border: none; background: none; color: var(--te
 <!-- Firebase SDK (compat) -->
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+
+<!-- Supabase SDK & PeerJS P2P -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 
 <script>
 // ===== FIREBASE CONFIG =====
@@ -1263,11 +1249,24 @@ try {
   console.warn("Firebase init skipped, running in local fallback mode:", e);
 }
 
-// ===== RESILIENT CLOUD REALTIME MESH + MOCK DB (v3 Fresh) =====
+// ===== SUPABASE CLIENT INITIALIZATION =====
+let supabaseClient = null;
+const savedSbUrl = localStorage.getItem('chatme_supabase_url') || '';
+const savedSbKey = localStorage.getItem('chatme_supabase_key') || '';
+try {
+  if (savedSbUrl && savedSbKey && typeof supabase !== 'undefined' && supabase.createClient) {
+    supabaseClient = supabase.createClient(savedSbUrl, savedSbKey);
+    console.log('Supabase client initialized ✨');
+  }
+} catch (e) {
+  console.warn('Supabase init failed:', e);
+}
+
+// ===== RESILIENT CLOUD REALTIME MESH + MOCK DB (v5 Clean) =====
 if (!isFirebaseActive || !db) {
-  const STORE_KEY = 'chatme_local_store_v3';
-  const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('chatme_rt_sync_v3') : null;
-  const CLOUD_SYNC_TOPIC = 'chatme_faraz_mesh_v3';
+  const STORE_KEY = 'chatme_local_store_v5';
+  const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('chatme_rt_sync_v5') : null;
+  const CLOUD_SYNC_TOPIC = 'chatme_v5_live_mesh';
   const CLIENT_INSTANCE_ID = 'inst_' + Math.random().toString(36).substring(2, 10);
 
   // Clean up legacy v1/v2 data so all old IDs and stale chats are cleared
@@ -1393,10 +1392,55 @@ if (!isFirebaseActive || !db) {
     }
   }
 
-  // Direct media upload via ntfy media channel (gives direct binary stream URL with CORS)
-  async function uploadMediaFile(fileOrBlob, defaultName = 'media.jpg') {
+  // Direct media upload with Supabase Storage (if configured) + tmpfiles.org (free direct video streaming) + backup
+  async function uploadMediaFile(fileOrBlob, defaultName = 'media.mp4') {
+    const rawName = (fileOrBlob && fileOrBlob.name) ? fileOrBlob.name : defaultName;
+    const cleanName = rawName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const fname = Date.now() + '_' + cleanName;
+    const isVideo = (fileOrBlob && fileOrBlob.type && fileOrBlob.type.startsWith('video')) || cleanName.match(/\.(mp4|webm|mov|mkv|avi)$/i);
+
+    // 1. Supabase Storage (if configured by user in Settings)
+    if (supabaseClient) {
+      try {
+        const { data, error } = await supabaseClient.storage.from('chat-media').upload(fname, fileOrBlob, {
+          cacheControl: '3600',
+          upsert: true
+        });
+        if (!error && data) {
+          const { data: pubData } = supabaseClient.storage.from('chat-media').getPublicUrl(fname);
+          if (pubData && pubData.publicUrl) return pubData.publicUrl;
+        } else {
+          // If 'chat-media' bucket not found, try 'videos' bucket
+          const { data: vData, error: vErr } = await supabaseClient.storage.from('videos').upload(fname, fileOrBlob, { upsert: true });
+          if (!vErr && vData) {
+            const { data: vPub } = supabaseClient.storage.from('videos').getPublicUrl(fname);
+            if (vPub && vPub.publicUrl) return vPub.publicUrl;
+          }
+        }
+      } catch (sbe) {
+        console.warn('Supabase storage error, using fallback:', sbe);
+      }
+    }
+
+    // 2. Free Direct Video Streaming Server: tmpfiles.org (Instant direct streaming link, no API key needed)
     try {
-      const fname = (fileOrBlob && fileOrBlob.name) ? fileOrBlob.name : defaultName;
+      const formData = new FormData();
+      formData.append('file', fileOrBlob, fname);
+      const tfRes = await fetch('https://tmpfiles.org/api/v1/upload', {
+        method: 'POST',
+        body: formData
+      });
+      const tfJson = await tfRes.json();
+      if (tfJson && tfJson.data && tfJson.data.url) {
+        const directUrl = tfJson.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+        return directUrl;
+      }
+    } catch (tfe) {
+      console.warn('tmpfiles.org upload error, trying backup:', tfe);
+    }
+
+    // 3. Backup: ntfy media channel
+    try {
       const res = await fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC + '_media', {
         method: 'PUT',
         headers: { 'Filename': fname },
@@ -1406,14 +1450,13 @@ if (!isFirebaseActive || !db) {
       if (json && json.attachment && json.attachment.url) {
         return json.attachment.url;
       }
-    } catch (e) {
-      console.error('Media upload error:', e);
-    }
+    } catch (e) {}
+
     return null;
   }
   window.uploadMediaFile = uploadMediaFile;
 
-  // Cloud Mesh Synchronization over ntfy.sh (Cross-device WebSocket + HTTP)
+  // Cloud Mesh Synchronization (Flood-Proof Rate-Controlled Realtime Sync)
   function syncToCloud(op, path, val) {
     try {
       const payload = {
@@ -1423,11 +1466,42 @@ if (!isFirebaseActive || !db) {
         val: val,
         time: Date.now()
       };
-      const p = fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC, {
-        method: 'POST',
-        headers: { 'Title': 'ChatMeSync' },
-        body: JSON.stringify(payload)
-      }).catch(() => {}).finally(() => pendingSyncs.delete(p));
+
+      // Broadcast over Supabase Realtime Channel if available
+      if (supabaseRealtimeChannel) {
+        try {
+          supabaseRealtimeChannel.send({
+            type: 'broadcast',
+            event: 'mesh_sync',
+            payload: payload
+          });
+        } catch (sbe) {}
+      }
+
+      // Also broadcast over P2P DataConnections if available
+      if (typeof broadcastPeerData === 'function') {
+        broadcastPeerData({ type: 'MESH_SYNC', payload });
+      }
+
+      const jsonStr = JSON.stringify(payload);
+      let p;
+      if (jsonStr.length > 3500) {
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        p = fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC, {
+          method: 'PUT',
+          headers: {
+            'Filename': 'sync_' + Date.now() + '.json',
+            'Title': 'ChatMeSync'
+          },
+          body: blob
+        }).catch(() => {}).finally(() => pendingSyncs.delete(p));
+      } else {
+        p = fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC, {
+          method: 'POST',
+          headers: { 'Title': 'ChatMeSync' },
+          body: jsonStr
+        }).catch(() => {}).finally(() => pendingSyncs.delete(p));
+      }
       pendingSyncs.add(p);
       return p;
     } catch (e) {}
@@ -1457,6 +1531,23 @@ if (!isFirebaseActive || !db) {
         ...extraData,
         time: Date.now()
       };
+
+      // Send directly over P2P DataConnection if open
+      if (typeof sendPeerData === 'function') {
+        sendPeerData(to, { type: 'CALL_SIGNAL', payload });
+      }
+
+      // Send over Supabase Realtime Channel if active
+      if (supabaseRealtimeChannel) {
+        try {
+          supabaseRealtimeChannel.send({
+            type: 'broadcast',
+            event: 'call_signal',
+            payload: payload
+          });
+        } catch (sbe) {}
+      }
+
       fetch('https://ntfy.sh/' + CLOUD_SYNC_TOPIC, {
         method: 'POST',
         headers: { 'Title': 'ConnectlyCall' },
@@ -1466,44 +1557,70 @@ if (!isFirebaseActive || !db) {
   }
 
   let cloudWs = null;
+  let supabaseRealtimeChannel = null;
+
   function initCloudMesh() {
+    // 1. Supabase Realtime Channel (Zero rate-limit, high speed)
+    if (supabaseClient && !supabaseRealtimeChannel) {
+      try {
+        supabaseRealtimeChannel = supabaseClient.channel('chatme_live_mesh');
+        supabaseRealtimeChannel
+          .on('broadcast', { event: 'mesh_sync' }, ({ payload }) => {
+            if (payload && payload.inst !== CLIENT_INSTANCE_ID) {
+              handleMeshPayload(payload);
+            }
+          })
+          .on('broadcast', { event: 'call_signal' }, ({ payload }) => {
+            if (payload && payload.to === currentUserId && payload.from !== currentUserId) {
+              handleIncomingCallSignal(payload);
+            }
+          })
+          .subscribe(status => {
+            if (status === 'SUBSCRIBED') {
+              console.log('Supabase Realtime Mesh connected 🚀');
+              const sbEl = document.getElementById('sbStatusSub');
+              if (sbEl) {
+                sbEl.textContent = 'Status: Supabase Live 🟢';
+                sbEl.style.color = '#22C55E';
+              }
+            }
+          });
+      } catch (e) {
+        console.warn('Supabase realtime init error:', e);
+      }
+    }
+
+    // 2. ntfy WebSocket (Fresh live stream without ?since=24h history replay)
     try {
-      cloudWs = new WebSocket('wss://ntfy.sh/' + CLOUD_SYNC_TOPIC + '/ws?since=24h');
+      if (cloudWs) {
+        try { cloudWs.close(); } catch (ce) {}
+      }
+      cloudWs = new WebSocket('wss://ntfy.sh/' + CLOUD_SYNC_TOPIC + '/ws');
       cloudWs.onopen = () => {
         console.log('Chat me Cloud Mesh connected ☁️');
         const st = document.getElementById('fbStatusSub');
         if (st && !isFirebaseActive) {
-          st.textContent = 'Status: Cloud Mesh Live 🟢 (Realtime Cross-Device)';
+          st.textContent = 'Status: Cloud Mesh Live 🟢 (Realtime)';
           st.style.color = '#22C55E';
         }
         if (currentUserId && currentUserData) {
-          syncToCloud('update', 'users/' + currentUserId, currentUserData);
-          // Broadcast our conversations to mesh so other device sees them
-          const allConvs = getNode(['conversations']) || {};
-          for (const [cid, conv] of Object.entries(allConvs)) {
-            if (conv && conv.participants && conv.participants[currentUserId]) {
-              syncToCloud('set', 'conversations/' + cid, conv);
-            }
-          }
-          // Broadcast our active stories to mesh
-          const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-          const allSt = getNode(['stories']) || {};
-          for (const [stId, st] of Object.entries(allSt)) {
-            if (st && st.userId === currentUserId && st.timestamp >= cutoff) {
-              syncToCloud('set', 'stories/' + stId, st);
-            }
-          }
-          // Ask other devices to broadcast their data
-          syncToCloud('query', 'users', { request: 'sync' });
+          // Announce ourselves once so online partners discover us
+          syncToCloud('update', 'users/' + currentUserId, {
+            id: currentUserId,
+            name: currentUserData.name,
+            avatar: currentUserData.avatar || '',
+            online: true,
+            lastSeen: Date.now()
+          });
         }
       };
+
       cloudWs.onmessage = async (event) => {
         try {
           const item = JSON.parse(event.data);
           if (item.event !== 'message') return;
 
           let rawText = item.message;
-          // Decode file attachments when payload > 4KB
           if (item.attachment && item.attachment.url) {
             try {
               const resp = await fetch(item.attachment.url);
@@ -1516,134 +1633,224 @@ if (!isFirebaseActive || !db) {
           const data = JSON.parse(rawText);
           if (!data || data.inst === CLIENT_INSTANCE_ID) return;
 
-          if (data.type === 'CALL_SIGNAL') {
-            if (data.to === currentUserId && data.from !== currentUserId) {
-              const sigAge = Date.now() - (data.time || 0);
-              // Strictly reject old/replayed call signals (older than 15s or before app boot)
-              if (data.time && data.time >= (window.APP_BOOT_TIME || 0) - 3000 && sigAge >= 0 && sigAge < 15000) {
-                handleIncomingCallSignal(data);
-              }
-            }
-            return;
-          }
-
-          if (data.op === 'set') {
-            const parts = getPathParts(data.path);
-            setNode(parts, data.val);
-            if (data.path.startsWith('users/')) {
-              const uid = data.path.split('/')[1];
-              delete usersCache[uid];
-              if (currentChatUserId === uid) {
-                const u = data.val || {};
-                const letter = (u.name || uid)[0].toUpperCase();
-                const avatarEl = document.getElementById('chatAvatar');
-                if (avatarEl) {
-                  if (u.avatar) avatarEl.innerHTML = `<img src="${u.avatar}">`;
-                  else avatarEl.innerHTML = `<span id="chatAvatarText">${letter}</span>`;
-                }
-                const nameEl = document.getElementById('chatHeaderName');
-                if (nameEl && u.name) nameEl.textContent = u.name;
-              }
-              if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
-            }
-            notifyLocal(data.path);
-            if (data.path.startsWith('stories')) {
-              if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
-              if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
-            }
-          } else if (data.op === 'update') {
-            const parts = getPathParts(data.path);
-            let cur = getNode(parts);
-            if (!cur || typeof cur !== 'object') cur = {};
-            for (const [k, v] of Object.entries(data.val || {})) {
-              if (k.includes('/')) {
-                setNode(getPathParts(data.path + '/' + k), v);
-              } else {
-                cur[k] = v;
-              }
-            }
-            setNode(parts, cur);
-            if (data.path.startsWith('users/')) {
-              const uid = data.path.split('/')[1];
-              delete usersCache[uid];
-              if (currentChatUserId === uid) {
-                const u = getNode(['users', uid]) || {};
-                const letter = (u.name || uid)[0].toUpperCase();
-                const avatarEl = document.getElementById('chatAvatar');
-                if (avatarEl) {
-                  if (u.avatar) avatarEl.innerHTML = `<img src="${u.avatar}">`;
-                  else avatarEl.innerHTML = `<span id="chatAvatarText">${letter}</span>`;
-                }
-                const nameEl = document.getElementById('chatHeaderName');
-                if (nameEl && u.name) nameEl.textContent = u.name;
-              }
-              if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
-            }
-            notifyLocal(data.path);
-            if (data.path.startsWith('stories')) {
-              if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
-              if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
-            }
-          } else if (data.op === 'remove') {
-            const parts = getPathParts(data.path);
-            if (parts.length > 0) {
-              const parent = getNode(parts.slice(0, -1));
-              if (parent && typeof parent === 'object') {
-                delete parent[parts[parts.length - 1]];
-              }
-            }
-            if (data.path.startsWith('users/')) {
-              const uid = data.path.split('/')[1];
-              delete usersCache[uid];
-              if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
-            }
-            if (data.path.startsWith('conversations/') && currentConversationId === data.path.split('/')[1]) {
-              if (typeof closeChatView === 'function') closeChatView();
-            }
-            notifyLocal(data.path);
-            if (data.path.startsWith('stories')) {
-              if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
-              if (currentChatUserId && typeof checkAndShowPartnerStatus === 'function') checkAndShowPartnerStatus(currentChatUserId);
-            }
-          } else if (data.op === 'query') {
-            if (currentUserId && currentUserData) {
-              syncToCloud('update', 'users/' + currentUserId, currentUserData);
-              // Also broadcast all conversations this user is part of
-              const allConvs = getNode(['conversations']) || {};
-              for (const [cid, conv] of Object.entries(allConvs)) {
-                if (conv && conv.participants && conv.participants[currentUserId]) {
-                  syncToCloud('set', 'conversations/' + cid, conv);
-                }
-              }
-              // Also broadcast messages in those conversations
-              const allMsgs = getNode(['messages']) || {};
-              for (const [cid, msgs] of Object.entries(allMsgs)) {
-                if (allConvs[cid] && allConvs[cid].participants && allConvs[cid].participants[currentUserId]) {
-                  syncToCloud('set', 'messages/' + cid, msgs);
-                }
-              }
-              const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-              const allSt = getNode(['stories']) || {};
-              for (const [stId, st] of Object.entries(allSt)) {
-                if (st && st.userId === currentUserId && st.timestamp >= cutoff) {
-                  syncToCloud('set', 'stories/' + stId, st);
-                }
-              }
-            }
-          }
+          handleMeshPayload(data);
         } catch (err) {}
       };
+
       cloudWs.onclose = () => {
-        setTimeout(initCloudMesh, 3000);
+        setTimeout(initCloudMesh, 6000);
       };
       cloudWs.onerror = () => {
         try { cloudWs.close(); } catch (e) {}
       };
     } catch (e) {
-      setTimeout(initCloudMesh, 5000);
+      setTimeout(initCloudMesh, 8000);
     }
   }
+
+  function handleMeshPayload(data) {
+    if (!data || data.inst === CLIENT_INSTANCE_ID) return;
+
+    if (data.type === 'CALL_SIGNAL') {
+      if (data.to === currentUserId && data.from !== currentUserId) {
+        const sigAge = Date.now() - (data.time || 0);
+        if (data.time && data.time >= (window.APP_BOOT_TIME || 0) - 5000 && sigAge >= 0 && sigAge < 25000) {
+          handleIncomingCallSignal(data);
+        }
+      }
+      return;
+    }
+
+    if (data.op === 'set') {
+      const parts = getPathParts(data.path);
+      setNode(parts, data.val);
+      if (data.path.startsWith('users/')) {
+        const uid = data.path.split('/')[1];
+        delete usersCache[uid];
+        if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
+      }
+      notifyLocal(data.path);
+      if (data.path.startsWith('messages/')) {
+        const convId = data.path.split('/')[1];
+        if (currentConversationId === convId) {
+          const msgs = getNode(['messages', convId]) || {};
+          renderMessages(msgs);
+        }
+      }
+      if (data.path.startsWith('stories')) {
+        if (typeof renderChatList === 'function' && typeof conversations !== 'undefined') renderChatList(conversations);
+      }
+    } else if (data.op === 'update') {
+      const parts = getPathParts(data.path);
+      let cur = getNode(parts);
+      if (!cur || typeof cur !== 'object') cur = {};
+      for (const [k, v] of Object.entries(data.val || {})) {
+        if (k.includes('/')) {
+          setNode(getPathParts(data.path + '/' + k), v);
+        } else {
+          cur[k] = v;
+        }
+      }
+      setNode(parts, cur);
+      if (data.path.startsWith('users/')) {
+        const uid = data.path.split('/')[1];
+        delete usersCache[uid];
+        if (typeof refreshActiveSearch === 'function') refreshActiveSearch();
+      }
+      notifyLocal(data.path);
+    } else if (data.op === 'remove') {
+      const parts = getPathParts(data.path);
+      if (parts.length > 0) {
+        const parent = getNode(parts.slice(0, -1));
+        if (parent && typeof parent === 'object') {
+          delete parent[parts[parts.length - 1]];
+        }
+      }
+      notifyLocal(data.path);
+    } else if (data.op === 'query') {
+      // Respond with our user profile only (NO FLOOD LOOP)
+      if (currentUserId && currentUserData) {
+        syncToCloud('update', 'users/' + currentUserId, {
+          id: currentUserId,
+          name: currentUserData.name,
+          avatar: currentUserData.avatar || '',
+          online: true,
+          lastSeen: Date.now()
+        });
+      }
+    }
+  }
+
   initCloudMesh();
+
+  // ===== PEERJS DIRECT P2P REALTIME ENGINE =====
+  let peerInstance = null;
+  const peerConnections = new Map();
+
+  function initPeerEngine() {
+    if (!currentUserId || typeof Peer === 'undefined') return;
+    try {
+      if (peerInstance) {
+        try { peerInstance.destroy(); } catch (e) {}
+      }
+      const peerId = 'chatme_' + currentUserId.toLowerCase().replace(/[^a-z0-9_]/g, '');
+      peerInstance = new Peer(peerId, {
+        config: ICE_SERVERS,
+        debug: 1
+      });
+
+      peerInstance.on('open', id => {
+        console.log('PeerJS P2P live with peerId:', id);
+      });
+
+      peerInstance.on('connection', conn => {
+        setupPeerConnection(conn);
+      });
+
+      peerInstance.on('call', mediaCall => {
+        handleIncomingPeerMediaCall(mediaCall);
+      });
+
+      peerInstance.on('error', err => {
+        console.warn('PeerJS note:', err.type);
+      });
+    } catch (e) {
+      console.warn('PeerJS init skipped:', e);
+    }
+  }
+
+  function setupPeerConnection(conn) {
+    const partnerId = conn.peer.replace('chatme_', '');
+    peerConnections.set(partnerId, conn);
+
+    conn.on('data', data => {
+      if (!data) return;
+      if (data.type === 'CHAT_MSG') {
+        const convId = data.convId;
+        const msg = data.msg;
+        if (convId && msg) {
+          setNode(['messages', convId, msg.id || ('m_' + Date.now())], msg);
+          setNode(['conversations', convId, 'lastMessage'], msg.text || (msg.video ? '🎥 Video' : (msg.image ? '📷 Photo' : 'Voice message')));
+          setNode(['conversations', convId, 'lastMessageTime'], msg.timestamp || Date.now());
+          saveStore();
+          notifyLocal('messages/' + convId);
+          notifyLocal('conversations/' + convId);
+          if (currentConversationId === convId) {
+            renderMessages(getNode(['messages', convId]) || {});
+          }
+        }
+      } else if (data.type === 'CALL_SIGNAL') {
+        handleIncomingCallSignal(data.payload);
+      } else if (data.type === 'MESH_SYNC') {
+        handleMeshPayload(data.payload);
+      }
+    });
+
+    conn.on('close', () => {
+      peerConnections.delete(partnerId);
+    });
+  }
+
+  function getOrCreatePeerConnection(targetUid) {
+    if (!peerInstance || !targetUid) return null;
+    const cleanUid = targetUid.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (peerConnections.has(cleanUid)) {
+      const existing = peerConnections.get(cleanUid);
+      if (existing.open) return existing;
+    }
+    try {
+      const conn = peerInstance.connect('chatme_' + cleanUid, { reliable: true });
+      setupPeerConnection(conn);
+      return conn;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function sendPeerData(targetUid, data) {
+    try {
+      const conn = getOrCreatePeerConnection(targetUid);
+      if (conn) {
+        if (conn.open) {
+          conn.send(data);
+        } else {
+          conn.on('open', () => conn.send(data));
+        }
+      }
+    } catch (e) {}
+  }
+
+  function broadcastPeerData(data) {
+    for (const [uid, conn] of peerConnections.entries()) {
+      try {
+        if (conn.open) conn.send(data);
+      } catch (e) {}
+    }
+  }
+
+  let activePeerMediaCall = null;
+  function handleIncomingPeerMediaCall(mediaCall) {
+    activePeerMediaCall = mediaCall;
+    const callerUid = mediaCall.peer.replace('chatme_', '');
+    incomingCallData = {
+      id: 'call_' + Date.now(),
+      callId: 'call_' + Date.now(),
+      from: callerUid,
+      type: 'audio'
+    };
+    currentCallType = 'audio';
+    getUserData(callerUid).then(caller => {
+      const letter = (caller.name || callerUid)[0].toUpperCase();
+      const avatarEl = document.getElementById('incomingCallAvatar');
+      if (caller.avatar) { avatarEl.innerHTML = `<img src="${caller.avatar}">`; }
+      else { avatarEl.innerHTML = `<span>${letter}</span>`; }
+      document.getElementById('incomingCallName').textContent = caller.name || callerUid;
+      document.getElementById('incomingCallType').textContent = 'Audio Call';
+      document.getElementById('incomingCall').classList.add('show');
+      document.getElementById('incomingCall').style.display = 'flex';
+      playIncomingRingtone();
+    });
+  }
 
   if (syncChannel) {
     syncChannel.onmessage = (e) => {
@@ -1856,7 +2063,6 @@ let callTimerInterval = null;
 let callSeconds = 0;
 let isMuted = false;
 let isSpeakerOn = false;
-let isVideoOn = true;
 let callListenerRef = null;
 let incomingCallListenerRef = null;
 let ringtoneAudio = null;
@@ -1872,7 +2078,10 @@ const ICE_SERVERS = {
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' }
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
   ]
 };
 
@@ -1918,6 +2127,7 @@ function showMainApp() {
   loadStatuses();
   loadCallLog();
   listenForIncomingCalls();
+  if (typeof initPeerEngine === 'function') initPeerEngine();
 }
 
 // ===== SETUP =====
@@ -2004,8 +2214,41 @@ function updateSettingsUI() {
   if (idEl) idEl.textContent = '@' + currentUserId;
   const fbSub = document.getElementById('fbStatusSub');
   if (fbSub) {
-    fbSub.textContent = isFirebaseActive ? 'Status: Active (Connected to Cloud ☁️)' : 'Status: Local Mode (Tap to connect Firebase)';
+    fbSub.textContent = isFirebaseActive ? 'Status: Active (Connected to Cloud ☁️)' : 'Status: Cloud Mesh Live (Tap to connect Firebase)';
     fbSub.style.color = isFirebaseActive ? 'var(--success)' : 'var(--warning)';
+  }
+  const sbSub = document.getElementById('sbStatusSub');
+  if (sbSub) {
+    const hasSb = !!localStorage.getItem('chatme_supabase_url');
+    sbSub.textContent = hasSb ? 'Status: Supabase Connected 🟢' : 'Status: Built-in Free Storage (Tap to add Supabase)';
+    sbSub.style.color = hasSb ? '#22C55E' : 'var(--text-secondary)';
+  }
+}
+
+function openSupabaseConfigPrompt() {
+  const curUrl = localStorage.getItem('chatme_supabase_url') || '';
+  const curKey = localStorage.getItem('chatme_supabase_key') || '';
+  const urlInput = prompt(
+    'Supabase Setup (Free Storage & DB):\n\nApna Supabase Project URL darj karein:\n(e.g. https://yourproject.supabase.co)\n\nEmpty chhorne se built-in free storage use hogi.',
+    curUrl
+  );
+  if (urlInput === null) return;
+  const keyInput = prompt(
+    'Supabase Anon / Public Key darj karein:\n(e.g. eyJhbGciOi...)',
+    curKey
+  );
+  if (keyInput === null) return;
+
+  if (urlInput.trim() && keyInput.trim()) {
+    localStorage.setItem('chatme_supabase_url', urlInput.trim());
+    localStorage.setItem('chatme_supabase_key', keyInput.trim());
+    alert('Supabase connected successfully! Reloading...');
+    location.reload();
+  } else {
+    localStorage.removeItem('chatme_supabase_url');
+    localStorage.removeItem('chatme_supabase_key');
+    alert('Supabase cleared. Built-in free storage mode active.');
+    location.reload();
   }
 }
 
@@ -2209,6 +2452,7 @@ async function openChat(userId) {
   currentChatUserId = userId;
   const convId = getConversationId(currentUserId, userId);
   currentConversationId = convId;
+  if (typeof getOrCreatePeerConnection === 'function') getOrCreatePeerConnection(userId);
   const user = await getUserData(userId);
   const letter = (user.name || userId)[0].toUpperCase();
   const avatarEl = document.getElementById('chatAvatar');
@@ -2363,8 +2607,14 @@ function renderMessages(msgs) {
 
     // 2. Video
     if (msg.video) {
-      content += `<div class="msg-video-card">
-        <video src="${msg.video}" controls playsinline preload="metadata" onclick="if(this.paused){this.play();}"></video>
+      content += `<div class="msg-video-card" style="max-width:280px">
+        <video src="${msg.video}" controls playsinline preload="metadata" style="width:100%;max-height:280px;display:block;border-radius:10px;background:#000" onclick="if(this.paused){this.play();}"></video>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 6px;background:rgba(0,0,0,0.2);border-radius:0 0 10px 10px">
+          <span style="font-size:11px;color:var(--text-secondary)">🎥 Video</span>
+          <a href="${msg.video}" target="_blank" download style="display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--primary);text-decoration:none;font-weight:600">
+            <span class="material-icons" style="font-size:14px">open_in_new</span> Open
+          </a>
+        </div>
       </div>`;
     }
 
@@ -2432,6 +2682,15 @@ async function sendMessage() {
 
   const msgRef = db.ref('messages/' + convId).push();
   await msgRef.set(msgData);
+
+  const otherUid = currentChatUserId;
+  if (typeof sendPeerData === 'function' && otherUid) {
+    sendPeerData(otherUid, {
+      type: 'CHAT_MSG',
+      convId: convId,
+      msg: { ...msgData, id: msgRef.key }
+    });
+  }
 
   let preview = text;
   if (!preview) {
@@ -2538,20 +2797,22 @@ function handleChatMediaSelect(event) {
     };
     reader.readAsDataURL(file);
   } else if (isVideo) {
-    if (file.size > 50 * 1024 * 1024) {
-      showToast('Video too large. Max 50MB allowed.');
+    if (file.size > 100 * 1024 * 1024) {
+      showToast('Video too large. Max 100MB allowed.');
       event.target.value = '';
       return;
     }
 
-    showToast('Uploading video...');
+    showToast('Uploading video... Please wait 🎥');
+    document.getElementById('imgPreviewThumb').style.display = 'none';
+    document.getElementById('videoPreviewIcon').style.display = 'flex';
+    document.getElementById('previewBarLabel').textContent = 'Uploading: ' + file.name + '...';
+    document.getElementById('imgPreviewBar').classList.add('show');
+
     uploadMediaFile(file, file.name || 'video.mp4').then(streamUrl => {
       if (streamUrl) {
         pendingMedia = { type: 'video', data: streamUrl, name: file.name };
-        document.getElementById('imgPreviewThumb').style.display = 'none';
-        document.getElementById('videoPreviewIcon').style.display = 'flex';
         document.getElementById('previewBarLabel').textContent = 'Video ready: ' + file.name;
-        document.getElementById('imgPreviewBar').classList.add('show');
         updateSendVoiceBtnVisibility();
         showToast('Video ready to send! 🎥');
       } else {
@@ -2559,14 +2820,15 @@ function handleChatMediaSelect(event) {
         const reader = new FileReader();
         reader.onload = function(e) {
           pendingMedia = { type: 'video', data: e.target.result, name: file.name };
-          document.getElementById('imgPreviewThumb').style.display = 'none';
-          document.getElementById('videoPreviewIcon').style.display = 'flex';
           document.getElementById('previewBarLabel').textContent = 'Video attached: ' + file.name;
-          document.getElementById('imgPreviewBar').classList.add('show');
           updateSendVoiceBtnVisibility();
+          showToast('Video attached!');
         };
         reader.readAsDataURL(file);
       }
+    }).catch(err => {
+      console.warn('Video upload error:', err);
+      showToast('Video upload failed, please retry');
     });
   }
   event.target.value = '';
@@ -2891,6 +3153,15 @@ async function sendStickerMessage(stickerEmoji) {
   };
   const msgRef = db.ref('messages/' + convId).push();
   await msgRef.set(msgData);
+
+  const otherUid = currentChatUserId;
+  if (typeof sendPeerData === 'function' && otherUid) {
+    sendPeerData(otherUid, {
+      type: 'CHAT_MSG',
+      convId: convId,
+      msg: { ...msgData, id: msgRef.key }
+    });
+  }
   await db.ref('conversations/' + convId).update({
     participants: { [currentUserId]: true, [otherUid]: true },
     lastMessage: '🎨 Sticker ' + stickerEmoji,
@@ -3479,7 +3750,7 @@ async function toggleStatusLike(e) {
   document.getElementById('statusLikeCount').textContent = story.likes ? Object.keys(story.likes).length : 0;
 }
 
-// ===== CALLS (WEBRTC AUDIO & VIDEO WITH CLOUD MESH SIGNALING) =====
+// ===== CALLS (WEBRTC AUDIO ONLY WITH CLOUD MESH SIGNALING) =====
 function listenForIncomingCalls() {
   if (incomingCallListenerRef) db.ref('calls').off('child_added', incomingCallListenerRef);
   const bootThreshold = (typeof APP_BOOT_TIME !== 'undefined' ? APP_BOOT_TIME : Date.now()) - 3000;
@@ -3488,15 +3759,15 @@ function listenForIncomingCalls() {
     if (!call || call.status !== 'ringing' || call.from === currentUserId) return;
     // Strictly reject old/replayed calls on open
     if (!call.timestamp || call.timestamp < bootThreshold || (Date.now() - call.timestamp > 15000)) return;
-    incomingCallData = { ...call, id: snap.key, callId: snap.key, callType: call.type };
-    currentCallType = call.type;
+    incomingCallData = { ...call, id: snap.key, callId: snap.key, callType: 'audio' };
+    currentCallType = 'audio';
     const caller = await getUserData(call.from);
     const letter = (caller.name || call.from)[0].toUpperCase();
     const avatarEl = document.getElementById('incomingCallAvatar');
     if (caller.avatar) { avatarEl.innerHTML = `<img src="${caller.avatar}">`; }
     else { avatarEl.innerHTML = `<span>${letter}</span>`; }
     document.getElementById('incomingCallName').textContent = caller.name || call.from;
-    document.getElementById('incomingCallType').textContent = call.type === 'video' ? 'Video Call' : 'Audio Call';
+    document.getElementById('incomingCallType').textContent = 'Audio Call';
     document.getElementById('incomingCall').classList.add('show');
     document.getElementById('incomingCall').style.display = 'flex';
     playIncomingRingtone();
@@ -3519,9 +3790,9 @@ async function handleIncomingCallSignal(sig) {
       from: sig.from,
       fromName: sig.fromName,
       fromAvatar: sig.fromAvatar,
-      type: sig.callType || 'audio'
+      type: 'audio'
     };
-    currentCallType = incomingCallData.type;
+    currentCallType = 'audio';
 
     let caller = null;
     try { caller = await getUserData(sig.from); } catch (e) {}
@@ -3532,7 +3803,7 @@ async function handleIncomingCallSignal(sig) {
     if (caller.avatar) { avatarEl.innerHTML = `<img src="${caller.avatar}">`; }
     else { avatarEl.innerHTML = `<span>${letter}</span>`; }
     document.getElementById('incomingCallName').textContent = caller.name || sig.from;
-    document.getElementById('incomingCallType').textContent = currentCallType === 'video' ? 'Video Call' : 'Audio Call';
+    document.getElementById('incomingCallType').textContent = 'Audio Call';
     document.getElementById('incomingCall').classList.add('show');
     document.getElementById('incomingCall').style.display = 'flex';
     playIncomingRingtone();
@@ -3727,7 +3998,7 @@ async function acceptIncomingCall() {
 
   const data = incomingCallData;
   currentCallId = data.callId || data.id || ('call_' + Date.now());
-  currentCallType = data.type || data.callType || 'audio';
+  currentCallType = 'audio';
   isCallInitiator = false;
   currentChatUserId = data.from;
 
@@ -3735,15 +4006,47 @@ async function acceptIncomingCall() {
   try { caller = await getUserData(data.from); } catch (e) {}
   if (!caller) caller = { id: data.from, name: data.fromName || data.from, avatar: data.fromAvatar };
 
-  showCallScreen(caller, currentCallType);
+  showCallScreen(caller);
 
-  sendCallSignal('accepted', data.from, { callType: currentCallType, callId: currentCallId });
+  if (activePeerMediaCall) {
+    try {
+      navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(stream => {
+        localStream = stream;
+        activePeerMediaCall.answer(stream);
+        activePeerMediaCall.on('stream', remoteStream => {
+          callConnected = true;
+          stopRingingAudio();
+          const remoteAud = document.getElementById('remoteAudio');
+          if (remoteAud) {
+            remoteAud.srcObject = remoteStream;
+            remoteAud.play().catch(e => console.warn('remoteAud play error:', e));
+          }
+          startCallTimer();
+        });
+        activePeerMediaCall.on('close', () => {
+          showToast('Call ended');
+          endCallCleanup();
+        });
+      }).catch(e => console.warn('Peer audio answer err:', e));
+    } catch (e) {}
+  }
+
+  sendCallSignal('accepted', data.from, { callType: 'audio', callId: currentCallId });
   if (currentCallId) {
     try { await db.ref('calls/' + currentCallId).update({ status: 'answered' }); } catch (e) {}
+    try {
+      db.ref('calls/' + currentCallId + '/status').on('value', snap => {
+        const st = snap.val();
+        if (st === 'ended') {
+          showToast('Call ended');
+          endCallCleanup();
+        }
+      });
+    } catch (e) {}
   }
 
   await setupWebRTC(false);
-  logCall(data.from, currentCallType, 'incoming');
+  logCall(data.from, 'audio', 'incoming');
 }
 
 async function rejectIncomingCall() {
@@ -3755,14 +4058,18 @@ async function rejectIncomingCall() {
     if (incomingCallData.id) {
       try { await db.ref('calls/' + incomingCallData.id).update({ status: 'rejected' }); } catch (e) {}
     }
-    logCall(incomingCallData.from, incomingCallData.type || 'audio', 'missed');
+    logCall(incomingCallData.from, 'audio', 'missed');
+  }
+  if (activePeerMediaCall) {
+    try { activePeerMediaCall.close(); } catch (e) {}
+    activePeerMediaCall = null;
   }
   incomingCallData = null;
 }
 
-async function startCall(type) {
+async function startCall(type = 'audio') {
   if (!currentChatUserId) return;
-  currentCallType = type;
+  currentCallType = 'audio';
   isCallInitiator = true;
   callConnected = false;
   pendingIceCandidates = [];
@@ -3772,11 +4079,36 @@ async function startCall(type) {
   try { user = await getUserData(currentChatUserId); } catch (e) {}
   if (!user) user = { id: currentChatUserId, name: currentChatUserId };
 
-  showCallScreen(user, type);
+  showCallScreen(user);
   playOutgoingRingback();
 
+  if (peerInstance && currentChatUserId) {
+    try {
+      const cleanTarget = currentChatUserId.toLowerCase().replace(/[^a-z0-9_]/g, '');
+      navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(stream => {
+        localStream = stream;
+        const mediaCall = peerInstance.call('chatme_' + cleanTarget, stream);
+        activePeerMediaCall = mediaCall;
+        mediaCall.on('stream', remoteStream => {
+          callConnected = true;
+          stopRingingAudio();
+          const remoteAud = document.getElementById('remoteAudio');
+          if (remoteAud) {
+            remoteAud.srcObject = remoteStream;
+            remoteAud.play().catch(e => console.warn('remoteAud play error:', e));
+          }
+          startCallTimer();
+        });
+        mediaCall.on('close', () => {
+          showToast('Call ended');
+          endCallCleanup();
+        });
+      }).catch(e => console.warn('P2P call media err:', e));
+    } catch (e) {}
+  }
+
   sendCallSignal('incoming', currentChatUserId, {
-    callType: type,
+    callType: 'audio',
     callId: currentCallId,
     fromName: currentUserData ? currentUserData.name : currentUserId,
     fromAvatar: currentUserData ? currentUserData.avatar : null
@@ -3786,14 +4118,22 @@ async function startCall(type) {
     const callData = {
       from: currentUserId,
       to: currentChatUserId,
-      type: type,
+      type: 'audio',
       status: 'ringing',
       timestamp: Date.now()
     };
     db.ref('calls/' + currentCallId).set(callData);
+
+    db.ref('calls/' + currentCallId + '/status').on('value', snap => {
+      const st = snap.val();
+      if (st === 'ended' || st === 'rejected') {
+        showToast(st === 'rejected' ? 'Call declined' : 'Call ended');
+        endCallCleanup();
+      }
+    });
   } catch (e) {}
 
-  logCall(currentChatUserId, type, 'outgoing');
+  logCall(currentChatUserId, 'audio', 'outgoing');
 
   if (callTimeoutTimer) clearTimeout(callTimeoutTimer);
   callTimeoutTimer = setTimeout(() => {
@@ -3809,7 +4149,7 @@ async function startCall(type) {
   }, 35000);
 }
 
-function showCallScreen(user, type) {
+function showCallScreen(user) {
   const letter = (user.name || user.id || '?')[0].toUpperCase();
   const avatarEl = document.getElementById('callScreenAvatar');
   if (user.avatar) { avatarEl.innerHTML = `<img src="${user.avatar}">`; }
@@ -3819,10 +4159,8 @@ function showCallScreen(user, type) {
   if (isCallInitiator) document.getElementById('callScreenStatus').classList.add('ringing');
   document.getElementById('callScreen').classList.add('show');
   document.getElementById('callScreen').style.display = 'flex';
-  document.getElementById('videoToggleBtn').style.display = type === 'video' ? '' : 'none';
   isMuted = false;
   isSpeakerOn = false;
-  isVideoOn = type === 'video';
   updateCallButtons();
 }
 
@@ -3836,22 +4174,10 @@ async function setupWebRTC(isOffer) {
           noiseSuppression: true,
           autoGainControl: true
         },
-        video: currentCallType === 'video' ? {
-          facingMode: 'user',
-          width: { ideal: 640 },
-          height: { ideal: 480 }
-        } : false
+        video: false
       };
 
       localStream = await navigator.mediaDevices.getUserMedia(constraints);
-
-      if (currentCallType === 'video') {
-        const localVid = document.getElementById('localVideo');
-        if (localVid) {
-          localVid.srcObject = localStream;
-          localVid.style.display = 'block';
-        }
-      }
 
       peerConnection = new RTCPeerConnection(ICE_SERVERS);
 
@@ -3863,18 +4189,8 @@ async function setupWebRTC(isOffer) {
         callConnected = true;
         stopRingingAudio();
         const stream = event.streams[0];
-        const remoteVid = document.getElementById('remoteVideo');
         const remoteAud = document.getElementById('remoteAudio');
 
-        if (remoteVid) {
-          remoteVid.srcObject = stream;
-          if (currentCallType === 'video') {
-            remoteVid.style.display = 'block';
-            const callScr = document.getElementById('callScreen');
-            if (callScr) callScr.classList.add('video-live');
-          }
-          remoteVid.play().catch(e => console.warn('remoteVid play err:', e));
-        }
         if (remoteAud) {
           remoteAud.srcObject = stream;
           remoteAud.play().catch(e => console.warn('remoteAud play err:', e));
@@ -3900,7 +4216,16 @@ async function setupWebRTC(isOffer) {
           if (state === 'connected') {
             callConnected = true;
             stopRingingAudio();
-          } else if (state === 'disconnected' || state === 'failed') {
+          } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+            endCall();
+          }
+        }
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        if (peerConnection) {
+          const state = peerConnection.iceConnectionState;
+          if (state === 'disconnected' || state === 'failed' || state === 'closed') {
             endCall();
           }
         }
@@ -3917,7 +4242,7 @@ async function setupWebRTC(isOffer) {
       }
     } catch (e) {
       console.error('setupWebRTC error:', e);
-      showToast('Camera/Microphone permission denied or unavailable');
+      showToast('Microphone permission denied or unavailable');
       stopRingingAudio();
       endCallCleanup();
     } finally {
@@ -3950,23 +4275,17 @@ function toggleSpeaker() {
   updateCallButtons();
 }
 
-function toggleVideo() {
-  isVideoOn = !isVideoOn;
-  if (localStream) localStream.getVideoTracks().forEach(t => t.enabled = isVideoOn);
-  const localVid = document.getElementById('localVideo');
-  if (localVid) localVid.style.display = isVideoOn ? 'block' : 'none';
-  updateCallButtons();
-}
-
 function updateCallButtons() {
   const muteBtn = document.getElementById('muteBtn');
   const speakerBtn = document.getElementById('speakerBtn');
-  const videoBtn = document.getElementById('videoToggleBtn');
-  muteBtn.classList.toggle('active', isMuted);
-  muteBtn.querySelector('.material-icons').textContent = isMuted ? 'mic_off' : 'mic';
-  speakerBtn.classList.toggle('active', isSpeakerOn);
-  videoBtn.classList.toggle('active', !isVideoOn);
-  videoBtn.querySelector('.material-icons').textContent = isVideoOn ? 'videocam' : 'videocam_off';
+  if (muteBtn) {
+    muteBtn.classList.toggle('active', isMuted);
+    const micIcon = muteBtn.querySelector('.material-icons');
+    if (micIcon) micIcon.textContent = isMuted ? 'mic_off' : 'mic';
+  }
+  if (speakerBtn) {
+    speakerBtn.classList.toggle('active', isSpeakerOn);
+  }
 }
 
 async function endCall() {
@@ -3976,6 +4295,7 @@ async function endCall() {
   }
   if (currentCallId) {
     try { await db.ref('calls/' + currentCallId).update({ status: 'ended' }); } catch (e) {}
+    try { await db.ref('calls/' + currentCallId + '/status').set('ended'); } catch (e) {}
   }
   stopRingingAudio();
   endCallCleanup();
@@ -3983,6 +4303,10 @@ async function endCall() {
 
 function endCallCleanup() {
   stopRingingAudio();
+  if (activePeerMediaCall) {
+    try { activePeerMediaCall.close(); } catch (e) {}
+    activePeerMediaCall = null;
+  }
   if (callTimeoutTimer) { clearTimeout(callTimeoutTimer); callTimeoutTimer = null; }
   clearInterval(callTimerInterval);
   callTimerInterval = null;
@@ -3997,12 +4321,6 @@ function endCallCleanup() {
     try { localStream.getTracks().forEach(t => t.stop()); } catch (e) {}
     localStream = null;
   }
-
-  const localVid = document.getElementById('localVideo');
-  if (localVid) { localVid.style.display = 'none'; localVid.srcObject = null; }
-
-  const remoteVid = document.getElementById('remoteVideo');
-  if (remoteVid) { remoteVid.style.display = 'none'; remoteVid.srcObject = null; }
 
   const remoteAud = document.getElementById('remoteAudio');
   if (remoteAud) { remoteAud.srcObject = null; }
@@ -4020,6 +4338,7 @@ function endCallCleanup() {
   if (currentCallId) {
     try {
       db.ref('calls/' + currentCallId).off();
+      db.ref('calls/' + currentCallId + '/status').off();
       db.ref('calls/' + currentCallId + '/iceCandidates').off();
       db.ref('calls/' + currentCallId + '/offer').off();
       db.ref('calls/' + currentCallId + '/answer').off();
@@ -4035,7 +4354,7 @@ async function logCall(otherUid, type, direction) {
   const logEntry = {
     userId: currentUserId,
     otherUserId: otherUid,
-    type: type,
+    type: 'audio',
     direction: direction,
     timestamp: Date.now()
   };
@@ -4057,7 +4376,6 @@ function loadCallLog() {
       const avatarContent = user.avatar ? `<img src="${user.avatar}">` : letter;
       const icon = log.direction === 'incoming' ? 'call_received' : (log.direction === 'outgoing' ? 'call_made' : 'call_missed');
       const colorClass = log.direction === 'incoming' ? 'incoming' : (log.direction === 'outgoing' ? 'outgoing' : 'missed');
-      const typeIcon = log.type === 'video' ? 'videocam' : 'call';
       html += `<div class="call-item">
         <div class="avatar" style="width:48px;height:48px;font-size:18px">${avatarContent}</div>
         <div class="call-info">
@@ -4067,8 +4385,8 @@ function loadCallLog() {
             ${formatTime(log.timestamp)}
           </div>
         </div>
-        <button class="call-action" onclick="openChat('${log.otherUserId}');startCall('${log.type}')">
-          <span class="material-icons">${typeIcon}</span>
+        <button class="call-action" onclick="openChat('${log.otherUserId}');startCall('audio')" title="Call">
+          <span class="material-icons">call</span>
         </button>
       </div>`;
     }
